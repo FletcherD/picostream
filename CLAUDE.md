@@ -159,6 +159,12 @@ nusb examples at `/home/fletcher/RustroverProjects/nusb/examples/`:
 
 ### Common Issues
 
+**Cargo runner not applied for RP235x target:**
+- Target triples with dots (like `thumbv8m.main-none-eabihf`) must NOT be quoted in `.cargo/config.toml`
+- Wrong: `[target.'thumbv8m.main-none-eabihf']` or `[target."thumbv8m.main-none-eabihf"]`
+- Correct: `[target.thumbv8m.main-none-eabihf]` (no quotes, TOML nested table)
+- Cargo splits target triples at dots during config lookup, so quoted keys don't match
+
 **Linker errors about undefined symbols (`__bi_entries_start`, etc.):**
 - Ensure build.rs includes proper `-Tlink.x` and memory.x has required sections
 
