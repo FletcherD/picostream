@@ -7,13 +7,14 @@ USB device for streaming arbitrary digital bitstreams out of an RP2040/RP235x GP
 ```
 pico-bitstream/
 ├── Cargo.toml           # Workspace definition
+├── .cargo/config.toml   # Workspace-level runner config
 ├── shared/              # no_std crate with common definitions
 │   └── src/lib.rs
 ├── firmware/            # RP2040/RP235x Embassy firmware
-│   ├── .cargo/config.toml
-│   ├── build.rs         # Selects memory.x based on feature
-│   ├── memory-rp2040.x
-│   ├── memory-rp235x.x
+│   ├── .cargo/config.toml  # Default target (thumbv6m-none-eabi)
+│   ├── build.rs            # Selects memory.x, sets linker args
+│   ├── memory-rp2040.x     # RP2040 linker script (boot2)
+│   ├── memory-rp235x.x     # RP235x linker script (start_block/end_block)
 │   └── src/main.rs
 └── client/              # Desktop CLI using nusb
     └── src/main.rs
@@ -50,29 +51,22 @@ Desktop CLI using nusb 0.2:
 - Status display on stderr (~10 Hz updates)
 - Ctrl-C and EOF handling
 
-## Building
+## Building & Flashing
 
 ### Firmware for RP2040 (default)
 ```bash
-cd firmware
-cargo build --release
-# or explicitly:
-cargo build --release --target thumbv6m-none-eabi
+# Build and flash with probe-rs, streams defmt logs
+cargo run --release -p pico-bitstream-firmware
+
+# Or just build
+cargo build --release -p pico-bitstream-firmware
 ```
 
 ### Firmware for RP235x (Pico 2)
 ```bash
-cd firmware
-cargo build --release --target thumbv8m.main-none-eabihf --no-default-features --features rp235x
-```
-
-### Flash with picotool
-```bash
-# RP2040
-picotool load -x target/thumbv6m-none-eabi/release/pico-bitstream-firmware
-
-# RP235x
-picotool load -x target/thumbv8m.main-none-eabihf/release/pico-bitstream-firmware
+cargo run --release -p pico-bitstream-firmware \
+  --target thumbv8m.main-none-eabihf \
+  --no-default-features --features rp235x
 ```
 
 ### Client
@@ -84,13 +78,13 @@ cargo build --release -p pico-bitstream
 
 ```bash
 # Stream 1MHz bitstream
-echo -ne '\xAA\xAA\xAA\xAA' | pico-bitstream -s 1000000
+echo -ne '\xAA\xAA\xAA\xAA' | ./target/release/pico-bitstream -s 1000000
 
 # Continuous streaming from file
-cat data.bin | pico-bitstream -s 100000
+cat data.bin | ./target/release/pico-bitstream -s 100000
 
 # Test 500Hz square wave (0xAA = 10101010 at 1kHz = 500Hz fundamental)
-echo -ne '\xAA\xAA' | pico-bitstream -s 1000
+echo -ne '\xAA\xAA' | ./target/release/pico-bitstream -s 1000
 ```
 
 ## USB Protocol
@@ -123,3 +117,60 @@ BufferStatus (16 bytes):
 | Feature | rp2040 | rp235x |
 | RAM | 256K | 512K |
 | Boards | Pico, Pico W | Pico 2 |
+
+## Development Notes
+
+### Reference Examples
+Embassy examples are at `/home/fletcher/RustroverProjects/embassy/examples/`:
+- `rp/` - RP2040 examples (usb_raw_bulk.rs, pio_dma.rs useful)
+- `rp235x/` - RP235x examples
+
+nusb examples at `/home/fletcher/RustroverProjects/nusb/examples/`:
+- `bulk.rs`, `control.rs`, `bulk_io.rs` - USB transfer patterns
+
+### Key Implementation Details
+
+**Firmware architecture:**
+- `DeviceState` in `Mutex<CriticalSectionRawMutex, RefCell<...>>` for shared state
+- `ControlHandler` implements `embassy_usb::Handler` for vendor requests (sync callbacks)
+- `bulk_handler` async task: USB bulk OUT → ring buffer → DMA → PIO
+
+**PIO configuration:**
+- Program: single `out pins, 1` instruction in wrap loop
+- `ShiftConfig`: auto_fill=true, threshold=32, direction=Left (MSB first)
+- `FifoJoin::TxOnly` doubles TX FIFO to 8 words
+- Clock divider: `(system_clock / sample_rate).to_fixed()`
+
+**Client nusb patterns:**
+- `interface.endpoint::<Bulk, Out>(addr)?.writer(buf_size).with_num_transfers(n)`
+- Control: `interface.control_out(ControlOut{...}, timeout).wait()?`
+- `MaybeFuture` trait provides `.wait()` for blocking
+
+### Build System
+
+**build.rs responsibilities:**
+1. Copy correct memory.x based on `CARGO_FEATURE_RP235X`
+2. Set linker search path
+3. Add linker args: `--nmagic`, `-Tlink.x`, `-Tlink-rp.x` (RP2040 only), `-Tdefmt.x`
+
+**Memory layout differences:**
+- RP2040: BOOT2 section at 0x10000000, then FLASH
+- RP235x: start_block/end_block sections, bi_entries for picotool
+
+### Common Issues
+
+**Linker errors about undefined symbols (`__bi_entries_start`, etc.):**
+- Ensure build.rs includes proper `-Tlink.x` and memory.x has required sections
+
+**critical-section conflicts:**
+- Use `embassy-rp/critical-section-impl`, NOT `cortex-m/critical-section-single-core`
+- Use `cortex-m` with `inline-asm` feature only
+
+**USB not enumerating:**
+- Check VID/PID match between firmware and client
+- Ensure `Builder::new()` has all required buffers (config, bos, msos, control)
+
+### Dependencies (firmware)
+- embassy-executor 0.9, embassy-rp 0.9, embassy-usb 0.5
+- defmt 1.x, defmt-rtt 1.x for logging
+- fixed for clock divider math

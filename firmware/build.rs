@@ -22,4 +22,15 @@ fn main() {
     println!("cargo:rerun-if-changed=memory-rp2040.x");
     println!("cargo:rerun-if-changed=memory-rp235x.x");
     println!("cargo:rerun-if-changed=build.rs");
+
+    // Linker arguments
+    println!("cargo:rustc-link-arg-bins=--nmagic");
+    println!("cargo:rustc-link-arg-bins=-Tlink.x");
+
+    // RP2040 needs link-rp.x, RP235x does not
+    if env::var("CARGO_FEATURE_RP2040").is_ok() {
+        println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
+    }
+
+    println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
 }
