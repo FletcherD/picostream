@@ -1,6 +1,6 @@
 # pico-bitstream
 
-USB device for streaming arbitrary digital bitstreams out of an RP2040 GPIO pin.
+USB device for streaming arbitrary digital bitstreams out of an RP2040/RP235x GPIO pin.
 
 ## Project Structure
 
@@ -9,10 +9,11 @@ pico-bitstream/
 ├── Cargo.toml           # Workspace definition
 ├── shared/              # no_std crate with common definitions
 │   └── src/lib.rs
-├── firmware/            # RP2040 Embassy firmware
+├── firmware/            # RP2040/RP235x Embassy firmware
 │   ├── .cargo/config.toml
-│   ├── build.rs
-│   ├── memory.x
+│   ├── build.rs         # Selects memory.x based on feature
+│   ├── memory-rp2040.x
+│   ├── memory-rp235x.x
 │   └── src/main.rs
 └── client/              # Desktop CLI using nusb
     └── src/main.rs
@@ -29,7 +30,7 @@ Common definitions shared between firmware and client:
 - Constants (32KB ring buffer, GPIO 0, 125MHz clock)
 
 ### firmware (`pico-bitstream-firmware`)
-RP2040 firmware using Embassy 0.9:
+RP2040/RP235x firmware using Embassy 0.9:
 - USB device with vendor-specific interface (class 0xFF)
 - Bulk OUT endpoint receives data into 32KB ring buffer
 - PIO state machine outputs bits at configurable sample rate
@@ -37,10 +38,9 @@ RP2040 firmware using Embassy 0.9:
 - DMA transfers from ring buffer to PIO TX FIFO
 - Underrun detection and counting
 
-Key components:
-- `DeviceState`: Shared state protected by critical-section mutex
-- `ControlHandler`: Handles vendor USB control requests (sync callbacks)
-- `bulk_handler`: Async task reading USB bulk OUT, feeding PIO via DMA
+Cargo features:
+- `rp2040` (default) - Build for RP2040 (Pico, Pico W)
+- `rp235x` - Build for RP235x (Pico 2)
 
 ### client (`pico-bitstream`)
 Desktop CLI using nusb 0.2:
@@ -52,15 +52,27 @@ Desktop CLI using nusb 0.2:
 
 ## Building
 
-### Firmware
+### Firmware for RP2040 (default)
 ```bash
 cd firmware
+cargo build --release
+# or explicitly:
 cargo build --release --target thumbv6m-none-eabi
 ```
 
-Flash with picotool (device in BOOTSEL mode):
+### Firmware for RP235x (Pico 2)
 ```bash
+cd firmware
+cargo build --release --target thumbv8m.main-none-eabihf --no-default-features --features rp235x
+```
+
+### Flash with picotool
+```bash
+# RP2040
 picotool load -x target/thumbv6m-none-eabi/release/pico-bitstream-firmware
+
+# RP235x
+picotool load -x target/thumbv8m.main-none-eabihf/release/pico-bitstream-firmware
 ```
 
 ### Client
@@ -100,17 +112,14 @@ BufferStatus (16 bytes):
 ## Hardware
 
 - Output: GPIO 0
-- System clock: 125 MHz
-- Sample rate: clock_divider = 125MHz / sample_rate
+- System clock: 125 MHz (RP2040), 150 MHz (RP235x default)
+- Sample rate: clock_divider = system_clock / sample_rate
 
-## Dependencies
+## Target Differences
 
-Firmware uses Embassy 0.9.x ecosystem:
-- embassy-executor, embassy-rp, embassy-usb, embassy-sync, embassy-time
-- defmt/defmt-rtt for logging
-- fixed for clock divider calculations
-
-Client uses:
-- nusb 0.2 for USB communication
-- clap for CLI argument parsing
-- ctrlc for signal handling
+| | RP2040 | RP235x |
+|---|--------|--------|
+| Target | thumbv6m-none-eabi | thumbv8m.main-none-eabihf |
+| Feature | rp2040 | rp235x |
+| RAM | 256K | 512K |
+| Boards | Pico, Pico W | Pico 2 |

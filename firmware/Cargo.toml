@@ -3,11 +3,16 @@ name = "pico-bitstream-firmware"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["rp2040"]
+rp2040 = ["embassy-rp/rp2040"]
+rp235x = ["embassy-rp/rp235xa", "embassy-rp/binary-info"]
+
 [dependencies]
 pico-bitstream-shared = { path = "../shared" }
 
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }
-embassy-rp = { version = "0.9", features = ["rp2040", "time-driver", "critical-section-impl"] }
+embassy-rp = { version = "0.9", features = ["time-driver", "critical-section-impl"] }
 embassy-usb = "0.5"
 embassy-sync = "0.7"
 embassy-time = "0.5"

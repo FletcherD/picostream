@@ -1,4 +1,10 @@
-[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+# Default target is RP2040. For RP235x, use:
+#   cargo build --release --target thumbv8m.main-none-eabihf --no-default-features --features rp235x
+
+[target.thumbv6m-none-eabi]
+runner = "picotool load --update --verify --execute -t elf"
+
+[target.'thumbv8m.main-none-eabihf']
 runner = "picotool load --update --verify --execute -t elf"
 
 [build]
