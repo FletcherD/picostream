@@ -1,0 +1,11 @@
+[package]
+name = "pico-bitstream"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pico-bitstream-shared = { path = "../shared" }
+
+nusb = "0.2"
+clap = { version = "4", features = ["derive"] }
+ctrlc = "3"

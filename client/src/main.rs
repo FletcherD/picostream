@@ -1,0 +1,241 @@
+use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use clap::Parser;
+use nusb::transfer::{Bulk, ControlIn, ControlOut, ControlType, Out, Recipient};
+use nusb::MaybeFuture;
+
+use pico_bitstream_shared::*;
+
+#[derive(Parser, Debug)]
+#[command(name = "pico-bitstream")]
+#[command(about = "Stream digital bitstream to RP2040 GPIO")]
+struct Args {
+    /// Sample rate in Hz
+    #[arg(short = 's', long = "sample-rate")]
+    sample_rate: u32,
+
+    /// Skip status display
+    #[arg(long)]
+    quiet: bool,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
+    // Setup Ctrl-C handler
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+        eprintln!("\nInterrupted, stopping...");
+    })?;
+
+    // Find device
+    let device = find_device()?;
+    eprintln!("Found pico-bitstream device");
+
+    let interface = device.claim_interface(0).wait()?;
+
+    // Set sample rate
+    set_sample_rate(&interface, args.sample_rate)?;
+    eprintln!("Sample rate set to {} Hz", args.sample_rate);
+
+    // Start streaming
+    start_streaming(&interface)?;
+    eprintln!("Streaming started");
+
+    // Stream data from stdin
+    let result = stream_data(&interface, running.clone(), !args.quiet);
+
+    // Stop streaming
+    stop_streaming(&interface)?;
+    eprintln!("\nStreaming stopped");
+
+    // Print final status
+    if let Ok(status) = get_status(&interface) {
+        eprintln!(
+            "Final: {} bytes remaining, {} underruns",
+            status.bytes_used, status.underrun_count
+        );
+    }
+
+    result
+}
+
+fn find_device() -> Result<nusb::Device, Box<dyn std::error::Error>> {
+    for dev_info in nusb::list_devices().wait()? {
+        if dev_info.vendor_id() == USB_VID && dev_info.product_id() == USB_PID {
+            return Ok(dev_info.open().wait()?);
+        }
+    }
+    Err("Device not found (VID=0x1209, PID=0x0001)".into())
+}
+
+fn set_sample_rate(
+    interface: &nusb::Interface,
+    rate: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = rate.to_le_bytes();
+    interface
+        .control_out(
+            ControlOut {
+                control_type: ControlType::Vendor,
+                recipient: Recipient::Interface,
+                request: REQ_SET_SAMPLE_RATE,
+                value: 0,
+                index: 0,
+                data: &data,
+            },
+            Duration::from_secs(1),
+        )
+        .wait()?;
+    Ok(())
+}
+
+fn start_streaming(interface: &nusb::Interface) -> Result<(), Box<dyn std::error::Error>> {
+    interface
+        .control_out(
+            ControlOut {
+                control_type: ControlType::Vendor,
+                recipient: Recipient::Interface,
+                request: REQ_START,
+                value: 0,
+                index: 0,
+                data: &[],
+            },
+            Duration::from_secs(1),
+        )
+        .wait()?;
+    Ok(())
+}
+
+fn stop_streaming(interface: &nusb::Interface) -> Result<(), Box<dyn std::error::Error>> {
+    interface
+        .control_out(
+            ControlOut {
+                control_type: ControlType::Vendor,
+                recipient: Recipient::Interface,
+                request: REQ_STOP,
+                value: 0,
+                index: 0,
+                data: &[],
+            },
+            Duration::from_secs(1),
+        )
+        .wait()?;
+    Ok(())
+}
+
+fn get_status(interface: &nusb::Interface) -> Result<BufferStatus, Box<dyn std::error::Error>> {
+    let data = interface
+        .control_in(
+            ControlIn {
+                control_type: ControlType::Vendor,
+                recipient: Recipient::Interface,
+                request: REQ_GET_STATUS,
+                value: 0,
+                index: 0,
+                length: BufferStatus::SIZE as u16,
+            },
+            Duration::from_secs(1),
+        )
+        .wait()?;
+    BufferStatus::from_bytes(&data).ok_or("Invalid status response".into())
+}
+
+fn stream_data(
+    interface: &nusb::Interface,
+    running: Arc<AtomicBool>,
+    show_status: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stdin = io::stdin().lock();
+
+    // Get bulk OUT endpoint with writer interface
+    let mut writer = interface
+        .endpoint::<Bulk, Out>(EP_BULK_OUT)?
+        .writer(4096)
+        .with_num_transfers(8);
+
+    // Buffer for reading from stdin
+    let mut read_buf = [0u8; 4096];
+
+    let mut last_status_time = Instant::now();
+    let status_interval = Duration::from_millis(100);
+
+    let mut eof_reached = false;
+    let mut total_bytes_sent: u64 = 0;
+
+    while running.load(Ordering::SeqCst) && !eof_reached {
+        // Read from stdin
+        match stdin.read(&mut read_buf) {
+            Ok(0) => {
+                eof_reached = true;
+                eprintln!("\nEOF reached, draining buffer...");
+            }
+            Ok(n) => {
+                // Write to USB
+                writer.write_all(&read_buf[..n])?;
+                total_bytes_sent += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                continue;
+            }
+            Err(e) => {
+                eprintln!("\nStdin read error: {}", e);
+                break;
+            }
+        }
+
+        // Update status display periodically
+        if show_status && last_status_time.elapsed() >= status_interval {
+            if let Ok(status) = get_status(interface) {
+                display_status(&status, total_bytes_sent);
+            }
+            last_status_time = Instant::now();
+        }
+    }
+
+    // Flush remaining data
+    writer.flush()?;
+
+    // Wait for device buffer to drain
+    if eof_reached {
+        loop {
+            let status = get_status(interface)?;
+            if status.bytes_used == 0 || !running.load(Ordering::SeqCst) {
+                break;
+            }
+            if show_status {
+                display_status(&status, total_bytes_sent);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    Ok(())
+}
+
+fn display_status(status: &BufferStatus, total_sent: u64) {
+    let pct = status.fill_percentage();
+    let filled = (pct / 10) as usize;
+    let empty = 10 - filled;
+
+    let bar: String = "#".repeat(filled) + &"-".repeat(empty);
+
+    let used_kb = status.bytes_used as f32 / 1024.0;
+    let total_kb = status.buffer_size as f32 / 1024.0;
+
+    eprint!(
+        "\r[{}] {:3}% | {:5.1} KB/{:.0} KB | {} underruns | sent: {:.1} KB   ",
+        bar,
+        pct,
+        used_kb,
+        total_kb,
+        status.underrun_count,
+        total_sent as f32 / 1024.0
+    );
+    let _ = io::stderr().flush();
+}

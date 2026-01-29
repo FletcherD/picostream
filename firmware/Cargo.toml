@@ -1,0 +1,31 @@
+[package]
+name = "pico-bitstream-firmware"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pico-bitstream-shared = { path = "../shared" }
+
+embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }
+embassy-rp = { version = "0.9", features = ["rp2040", "time-driver", "critical-section-impl"] }
+embassy-usb = "0.5"
+embassy-sync = "0.7"
+embassy-time = "0.5"
+embassy-futures = "0.1"
+
+cortex-m = { version = "0.7", features = ["inline-asm"] }
+cortex-m-rt = "0.7"
+critical-section = "1.1"
+
+defmt = "1"
+defmt-rtt = "1"
+panic-probe = { version = "1", features = ["print-defmt"] }
+
+static_cell = "2"
+portable-atomic = { version = "1", features = ["critical-section"] }
+fixed = "1.23"
+
+[profile.release]
+debug = 2
+lto = true
+opt-level = "s"
