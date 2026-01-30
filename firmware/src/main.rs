@@ -6,16 +6,19 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
+use embassy_futures::join::join3;
+use embassy_futures::select::select;
 use embassy_rp::bind_interrupts;
 use embassy_rp::Peri;
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::program::pio_asm;
 use embassy_rp::clocks::clk_sys_freq;
-use embassy_rp::pio::{Config, InterruptHandler as PioInterruptHandler, Pio, ShiftConfig, ShiftDirection};
+use embassy_rp::pio::{Config, InterruptHandler as PioInterruptHandler, Pio, ShiftConfig, ShiftDirection, StateMachine};
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, Timer};
 use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
 use embassy_usb::driver::EndpointOut;
 use embassy_usb::types::InterfaceNumber;
@@ -109,6 +112,12 @@ static STATE: Mutex<CriticalSectionRawMutex, RefCell<DeviceState>> =
     Mutex::new(RefCell::new(DeviceState::new()));
 
 static CONFIG_CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// Signal to wake PIO feeder when new data is available
+static DATA_AVAILABLE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// Signal to wake USB receiver when buffer space is available
+static SPACE_AVAILABLE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Control handler for vendor-specific USB requests
 struct ControlHandler {
@@ -256,7 +265,7 @@ async fn main(_spawner: Spawner) {
     // PIO setup
     let Pio {
         mut common,
-        mut sm0,
+        sm0,
         ..
     } = Pio::new(p.PIO0, Irqs);
 
@@ -280,7 +289,7 @@ async fn main(_spawner: Spawner) {
     let initial_rate = STATE.lock(|s| s.borrow().sample_rate);
     let sys_freq = clk_sys_freq();
     info!("System clock: {} Hz, sample rate: {} Hz", sys_freq, initial_rate);
-    cfg.clock_divider = (sys_freq as f32 / initial_rate as f32).to_fixed();
+    cfg.clock_divider = 1500.to_fixed();
 
     // Shift out MSB first, autopull at 32 bits
     cfg.shift_out = ShiftConfig {
@@ -291,27 +300,70 @@ async fn main(_spawner: Spawner) {
 
     cfg.fifo_join = embassy_rp::pio::FifoJoin::TxOnly;
 
-    sm0.set_config(&cfg);
-    sm0.set_pin_dirs(embassy_rp::pio::Direction::Out, &[&out_pin]);
+    // Store config in static cell for PIO feeder task
+    static SM_CONFIG: StaticCell<Config<'static, PIO0>> = StaticCell::new();
+    let sm_config = SM_CONFIG.init(cfg);
 
-    info!("PIO configured: out_pin={}, set_pin={}", out_pin.pin(), out_pin.pin());
-
+    info!("PIO configured");
     info!("USB device ready");
 
-    // Run USB and bulk handler concurrently
+    // Run USB device, USB receiver, and PIO feeder concurrently
     let usb_fut = usb.run();
-    let bulk_fut = bulk_handler(&mut ep_out, &mut sm0, p.DMA_CH0);
+    let usb_receiver_fut = usb_receiver(&mut ep_out);
+    let pio_feeder_fut = pio_feeder(sm0, sm_config, p.DMA_CH0, out_pin);
 
-    join(usb_fut, bulk_fut).await;
+    join3(usb_fut, usb_receiver_fut, pio_feeder_fut).await;
 }
 
-/// Handle bulk OUT transfers and feed data to PIO
-async fn bulk_handler<'d>(
-    ep: &mut impl EndpointOut,
-    sm: &mut embassy_rp::pio::StateMachine<'d, PIO0, 0>,
-    mut dma: Peri<'d, DMA_CH0>,
-) {
+/// Handle bulk OUT transfers - receive USB data into ring buffer
+async fn usb_receiver(ep: &mut impl EndpointOut) {
     let mut buf = [0u8; 64];
+
+    loop {
+        // Wait for USB endpoint to be ready
+        ep.wait_enabled().await;
+
+        // Wait for buffer space before reading from USB (backpressure)
+        loop {
+            let space = STATE.lock(|s| s.borrow().ring_buffer.available_space());
+            if space >= buf.len() {
+                break;
+            }
+            // Buffer full, wait for PIO feeder to drain some data
+            SPACE_AVAILABLE.wait().await;
+        }
+
+        // Read bulk data
+        match ep.read(&mut buf).await {
+            Ok(n) => {
+                if n > 0 {
+                    // Push data to ring buffer (guaranteed to fit since we checked space)
+                    STATE.lock(|s| {
+                        s.borrow_mut().ring_buffer.push(&buf[..n]);
+                    });
+                    // Signal that new data is available
+                    DATA_AVAILABLE.signal(());
+                }
+            }
+            Err(_) => {
+                // Endpoint disconnected, continue waiting
+                continue;
+            }
+        }
+    }
+}
+
+/// Feed PIO from ring buffer using DMA - runs independently of USB reception
+async fn pio_feeder(
+    mut sm: StateMachine<'static, PIO0, 0>,
+    cfg: &'static Config<'static, PIO0>,
+    mut dma: Peri<'static, DMA_CH0>,
+    out_pin: embassy_rp::pio::Pin<'static, PIO0>,
+) {
+    // Apply config and set pin direction
+    sm.set_config(cfg);
+    sm.set_pin_dirs(embassy_rp::pio::Direction::Out, &[&out_pin]);
+
     let mut pio_running = false;
     let mut dma_buf = [0u32; 16]; // Buffer for DMA transfers
 
@@ -329,62 +381,60 @@ async fn bulk_handler<'d>(
             info!("PIO disabled");
         }
 
-        // Wait for USB endpoint to be ready
-        ep.wait_enabled().await;
-
-        // Read bulk data
-        match ep.read(&mut buf).await {
-            Ok(n) => {
-                if n > 0 {
-                    // Push data to ring buffer
-                    let written = STATE.lock(|s| {
-                        s.borrow_mut().ring_buffer.push(&buf[..n])
-                    });
-                    if written < n {
-                        warn!("Ring buffer overflow, dropped {} bytes", n - written);
-                    }
-                }
-            }
-            Err(_) => {
-                // Endpoint disconnected, continue waiting
-                continue;
-            }
+        if !pio_running {
+            // Wait for data signal or timeout to check running state
+            let _ = select(
+                DATA_AVAILABLE.wait(),
+                Timer::after(Duration::from_millis(100)),
+            ).await;
+            continue;
         }
 
-        // Feed PIO from ring buffer using DMA
-        if pio_running {
-            // Fill DMA buffer with words from ring buffer
-            let mut word_count = 0;
-            let mut word_buf = [0u8; 4];
+        // Check how much data is available
+        let available = STATE.lock(|s| s.borrow().ring_buffer.available_data());
 
-            while word_count < dma_buf.len() {
-                let read = STATE.lock(|s| {
-                    s.borrow_mut().ring_buffer.pop(&mut word_buf)
+        if available < 4 {
+            // Not enough data for even one word
+            // Check for underrun
+            let (_, tx) = sm.rx_tx();
+            if tx.empty() {
+                STATE.lock(|s| {
+                    s.borrow_mut().underrun_count += 1;
                 });
+                debug!("Underrun detected");
+            }
+            // Wait for more data (with short timeout to stay responsive)
+            let _ = select(
+                DATA_AVAILABLE.wait(),
+                Timer::after(Duration::from_micros(100)),
+            ).await;
+            continue;
+        }
 
-                if read < 4 {
-                    // Not enough data, check for underrun
-                    if read == 0 {
-                        let (_, tx) = sm.rx_tx();
-                        if tx.empty() {
-                            STATE.lock(|s| {
-                                s.borrow_mut().underrun_count += 1;
-                            });
-                        }
-                    }
-                    break;
-                }
+        // Fill DMA buffer with words from ring buffer
+        let mut word_count = 0;
+        let mut word_buf = [0u8; 4];
 
-                // Convert to u32 (MSB first for our shift direction)
-                dma_buf[word_count] = u32::from_be_bytes(word_buf);
-                word_count += 1;
+        while word_count < dma_buf.len() {
+            let read = STATE.lock(|s| {
+                s.borrow_mut().ring_buffer.pop(&mut word_buf)
+            });
+
+            if read < 4 {
+                break;
             }
 
-            // DMA push to PIO if we have data
-            if word_count > 0 {
-                let (_, tx) = sm.rx_tx();
-                tx.dma_push(dma.reborrow(), &dma_buf[..word_count], false).await;
-            }
+            // Convert to u32 (MSB first for our shift direction)
+            dma_buf[word_count] = u32::from_be_bytes(word_buf);
+            word_count += 1;
+        }
+
+        // DMA push to PIO
+        if word_count > 0 {
+            let (_, tx) = sm.rx_tx();
+            tx.dma_push(dma.reborrow(), &dma_buf[..word_count], false).await;
+            // Signal that buffer space is now available
+            SPACE_AVAILABLE.signal(());
         }
     }
 }

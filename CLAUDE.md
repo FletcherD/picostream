@@ -191,20 +191,11 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="0001", MODE="0666", 
 
 ## Testing
 
-### test-timing.sh
-Captures GPIO output using Sipeed SLogic16 and applies sigrok timing decoder:
-```bash
-./test-timing.sh
-```
-- Starts client sending 0xAA pattern at 1MHz in background
-- Records 2s of D0 at 5MHz sample rate
-- Applies timing decoder to show edge timing
-- Cleans up on exit
+### test-firmware.sh
 
-### Interpreting Client Status
-```
-[----------]   0% |   0.0 KB/32 KB | 0 underruns | sent: 480.0 KB
-```
-- `0.0 KB/32 KB`: Buffer fill - low/zero is normal, means data flows through quickly
-- `0 underruns`: PIO stalls waiting for data
-- `sent: 480.0 KB`: Total bytes sent to device - this confirms data is flowing
+A test script to: 
+- flash and run the firmware while capturing debug logs in the background. 
+- run the client and send it a block of data.
+- when the send finishes, kill the probe-rs process. 
+- save the logs from the firmware and client (both stdout and stderr) to separate files in /tmp and print their locations. 
+Use this script any time you want to run the entire system end to end to test or capture logs.
