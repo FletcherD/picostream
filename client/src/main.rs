@@ -273,16 +273,17 @@ fn display_status(status: &BufferStatus, total_sent: u64) {
 
     let used_samples = status.bytes_used as u64 * 8;
     let total_samples = status.buffer_size as u64 * 8;
-    let sent_samples = total_sent * 8;
+    let streamed_bytes = total_sent.saturating_sub(status.bytes_used as u64);
+    let streamed_samples = streamed_bytes * 8;
 
     eprint!(
-        "\r[{}] {:3}% | {}/{} samples | {} underruns | sent: {}   ",
+        "\r[{}] {:3}% | {}/{} samples | {} underruns | streamed: {}   ",
         bar,
         pct,
         format_samples(used_samples),
         format_samples(total_samples),
         status.underrun_count,
-        format_samples(sent_samples),
+        format_samples(streamed_samples),
     );
     let _ = io::stderr().flush();
 }
