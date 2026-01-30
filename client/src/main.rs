@@ -8,7 +8,7 @@ use clap::{Parser, ValueEnum};
 use nusb::transfer::{Bulk, ControlIn, ControlOut, ControlType, Out, Recipient};
 use nusb::MaybeFuture;
 
-use pico_bitstream_shared::*;
+use picostream_shared::*;
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum InputFormat {
@@ -20,8 +20,8 @@ enum InputFormat {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "pico-bitstream")]
-#[command(about = "Stream digital bitstream to RP2040 GPIO")]
+#[command(name = "picostream")]
+#[command(about = "Stream digital bitstream to RP2040/RP235x GPIO")]
 struct Args {
     /// Sample rate in Hz
     #[arg(short = 's', long = "sample-rate")]
@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Find device
     let device = find_device()?;
-    eprintln!("Found pico-bitstream device");
+    eprintln!("Found picostream device");
 
     let interface = device.claim_interface(0).wait()?;
 

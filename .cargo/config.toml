@@ -1,5 +1,5 @@
 # Firmware runner configuration
-# For RP235x: cargo run --release -p pico-bitstream-firmware --target thumbv8m.main-none-eabihf --no-default-features --features rp235x
+# For RP235x: cargo run --release -p picostream-firmware --target thumbv8m.main-none-eabihf --no-default-features --features rp235x
 
 [target.thumbv6m-none-eabi]
 runner = "probe-rs run --chip RP2040"

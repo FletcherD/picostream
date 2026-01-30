@@ -1,15 +1,14 @@
 [package]
-name = "pico-bitstream-firmware"
+name = "picostream-firmware"
 version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["rp2040"]
 rp2040 = ["embassy-rp/rp2040"]
 rp235x = ["embassy-rp/rp235xa", "embassy-rp/binary-info"]
 
 [dependencies]
-pico-bitstream-shared = { path = "../shared" }
+picostream-shared = { path = "../shared" }
 
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }
 embassy-rp = { version = "0.9", features = ["time-driver", "critical-section-impl"] }

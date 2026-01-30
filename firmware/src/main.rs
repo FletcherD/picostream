@@ -28,7 +28,7 @@ use embassy_usb::{Builder, Handler};
 use fixed::traits::ToFixed;
 use static_cell::StaticCell;
 
-use pico_bitstream_shared::*;
+use picostream_shared::*;
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -246,7 +246,7 @@ impl Handler for ControlHandler {
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
-    info!("pico-bitstream starting");
+    info!("picostream starting");
 
     let p = embassy_rp::init(Default::default());
 
@@ -260,7 +260,7 @@ async fn main(_spawner: Spawner) {
     let mut control_buf = [0; 64];
 
     let mut config = embassy_usb::Config::new(USB_VID, USB_PID);
-    config.manufacturer = Some("pico-bitstream");
+    config.manufacturer = Some("picostream");
     config.product = Some("Bitstream Generator");
     config.serial_number = Some("001");
     config.max_power = 100;

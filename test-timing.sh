@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test script to capture timing data from pico-bitstream output
+# Test script to capture timing data from picostream output
 # Uses Sipeed SLogic16 to record D0 and apply timing decoder
 
 set -e
@@ -7,7 +7,7 @@ set -e
 cd "$(dirname "$0")"
 
 # Build client if needed
-cargo build --release -p pico-bitstream
+cargo build --release -p picostream
 
 CLIENT_PID=""
 
@@ -23,7 +23,7 @@ trap cleanup EXIT
 echo "Starting client (0xAA pattern at 1MHz)..."
 while true; do
     dd if=/dev/zero bs=4096 count=256 2>/dev/null | tr '\0' '\252'
-done | ./target/release/pico-bitstream -s 1000000 &
+done | ./target/release/picostream -s 1000000 &
 CLIENT_PID=$!
 
 # Give client time to start and fill buffer
