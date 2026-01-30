@@ -9,3 +9,4 @@ pico-bitstream-shared = { path = "../shared" }
 nusb = "0.2"
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
+libc = "0.2"

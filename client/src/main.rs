@@ -1,4 +1,5 @@
 use std::io::{self, Read, Write};
+use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -151,7 +152,16 @@ fn stream_data(
     running: Arc<AtomicBool>,
     show_status: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stdin = io::stdin().lock();
+    let stdin = io::stdin();
+    let stdin_fd = stdin.as_raw_fd();
+
+    // Set stdin to non-blocking
+    unsafe {
+        let flags = libc::fcntl(stdin_fd, libc::F_GETFL);
+        libc::fcntl(stdin_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    let mut stdin = stdin.lock();
 
     // Get bulk OUT endpoint with writer interface
     let mut writer = interface
@@ -169,7 +179,7 @@ fn stream_data(
     let mut total_bytes_sent: u64 = 0;
 
     while running.load(Ordering::SeqCst) && !eof_reached {
-        // Read from stdin
+        // Read from stdin (non-blocking)
         match stdin.read(&mut read_buf) {
             Ok(0) => {
                 eof_reached = true;
@@ -179,6 +189,10 @@ fn stream_data(
                 // Write to USB
                 writer.write_all(&read_buf[..n])?;
                 total_bytes_sent += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // No data available, sleep briefly and check running flag
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 continue;
@@ -198,11 +212,13 @@ fn stream_data(
         }
     }
 
-    // Flush remaining data
-    writer.flush()?;
+    // Flush remaining data if not interrupted
+    if running.load(Ordering::SeqCst) {
+        writer.flush()?;
+    }
 
-    // Wait for device buffer to drain
-    if eof_reached {
+    // Wait for device buffer to drain (only if EOF, not if interrupted)
+    if eof_reached && running.load(Ordering::SeqCst) {
         loop {
             let status = get_status(interface)?;
             if status.bytes_used == 0 || !running.load(Ordering::SeqCst) {

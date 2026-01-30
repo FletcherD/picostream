@@ -160,14 +160,20 @@ impl Handler for ControlHandler {
                     state.ring_buffer.clear();
                 });
                 CONFIG_CHANGED.store(true, Ordering::Release);
+                // Wake USB receiver (buffer now has space after clear)
+                SPACE_AVAILABLE.signal(());
                 Some(OutResponse::Accepted)
             }
             REQ_STOP => {
                 info!("Stop streaming");
                 STATE.lock(|s| {
-                    s.borrow_mut().is_running = false;
+                    let mut state = s.borrow_mut();
+                    state.is_running = false;
+                    state.ring_buffer.clear();
                 });
                 CONFIG_CHANGED.store(true, Ordering::Release);
+                // Wake USB receiver (buffer cleared, can accept new data for next start)
+                SPACE_AVAILABLE.signal(());
                 Some(OutResponse::Accepted)
             }
             _ => {
@@ -289,7 +295,7 @@ async fn main(_spawner: Spawner) {
     let initial_rate = STATE.lock(|s| s.borrow().sample_rate);
     let sys_freq = clk_sys_freq();
     info!("System clock: {} Hz, sample rate: {} Hz", sys_freq, initial_rate);
-    cfg.clock_divider = 1500.to_fixed();
+    cfg.clock_divider = (sys_freq as f32 / initial_rate as f32).to_fixed();
 
     // Shift out MSB first, autopull at 32 bits
     cfg.shift_out = ShiftConfig {
@@ -364,10 +370,24 @@ async fn pio_feeder(
     sm.set_config(cfg);
     sm.set_pin_dirs(embassy_rp::pio::Direction::Out, &[&out_pin]);
 
+    let sys_freq = clk_sys_freq();
+    let mut current_sample_rate = STATE.lock(|s| s.borrow().sample_rate);
     let mut pio_running = false;
     let mut dma_buf = [0u32; 16]; // Buffer for DMA transfers
 
     loop {
+        // Check for config changes (sample rate)
+        if CONFIG_CHANGED.swap(false, Ordering::AcqRel) {
+            let new_rate = STATE.lock(|s| s.borrow().sample_rate);
+            if new_rate != current_sample_rate {
+                current_sample_rate = new_rate;
+                let divider: fixed::FixedU32<fixed::types::extra::U8> =
+                    (sys_freq as f32 / current_sample_rate as f32).to_fixed();
+                sm.set_clock_divider(divider);
+                info!("PIO clock divider updated for {} Hz", current_sample_rate);
+            }
+        }
+
         // Check if we need to update running state
         let is_running = STATE.lock(|s| s.borrow().is_running);
 
