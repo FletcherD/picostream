@@ -136,10 +136,10 @@ nusb examples at `/home/fletcher/RustroverProjects/nusb/examples/`:
 - `bulk_handler` async task: USB bulk OUT → ring buffer → DMA → PIO
 
 **PIO configuration:**
-- Program: single `out pins, 1` instruction in wrap loop
+- Program: `set pindirs, 1` (runs once) then `out pins, 1` in wrap loop
 - `ShiftConfig`: auto_fill=true, threshold=32, direction=Left (MSB first)
 - `FifoJoin::TxOnly` doubles TX FIFO to 8 words
-- Clock divider: `(system_clock / sample_rate).to_fixed()`
+- Clock divider: `(clk_sys_freq() / sample_rate).to_fixed()` - uses actual system clock
 
 **Client nusb patterns:**
 - `interface.endpoint::<Bulk, Out>(addr)?.writer(buf_size).with_num_transfers(n)`
@@ -158,6 +158,14 @@ nusb examples at `/home/fletcher/RustroverProjects/nusb/examples/`:
 - RP235x: start_block/end_block sections, bi_entries for picotool
 
 ### Common Issues
+
+**USB permission denied on Linux (error code 13):**
+- By default, USB devices are owned by root
+- Create udev rule: `/etc/udev/rules.d/99-pico-bitstream.rules`
+```
+SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="0001", MODE="0666", GROUP="plugdev"
+```
+- Reload rules: `sudo udevadm control --reload-rules && sudo udevadm trigger`
 
 **Cargo runner not applied for RP235x target:**
 - Target triples with dots (like `thumbv8m.main-none-eabihf`) must NOT be quoted in `.cargo/config.toml`
@@ -180,3 +188,23 @@ nusb examples at `/home/fletcher/RustroverProjects/nusb/examples/`:
 - embassy-executor 0.9, embassy-rp 0.9, embassy-usb 0.5
 - defmt 1.x, defmt-rtt 1.x for logging
 - fixed for clock divider math
+
+## Testing
+
+### test-timing.sh
+Captures GPIO output using Sipeed SLogic16 and applies sigrok timing decoder:
+```bash
+./test-timing.sh
+```
+- Starts client sending 0xAA pattern at 1MHz in background
+- Records 2s of D0 at 5MHz sample rate
+- Applies timing decoder to show edge timing
+- Cleans up on exit
+
+### Interpreting Client Status
+```
+[----------]   0% |   0.0 KB/32 KB | 0 underruns | sent: 480.0 KB
+```
+- `0.0 KB/32 KB`: Buffer fill - low/zero is normal, means data flows through quickly
+- `0 underruns`: PIO stalls waiting for data
+- `sent: 480.0 KB`: Total bytes sent to device - this confirms data is flowing

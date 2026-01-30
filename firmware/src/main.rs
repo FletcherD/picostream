@@ -11,6 +11,7 @@ use embassy_rp::bind_interrupts;
 use embassy_rp::Peri;
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::program::pio_asm;
+use embassy_rp::clocks::clk_sys_freq;
 use embassy_rp::pio::{Config, InterruptHandler as PioInterruptHandler, Pio, ShiftConfig, ShiftDirection};
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -260,7 +261,9 @@ async fn main(_spawner: Spawner) {
     } = Pio::new(p.PIO0, Irqs);
 
     // PIO program: output 1 bit at a time
+    // set pindirs runs once at startup to configure GPIO as output
     let prg = pio_asm!(
+        "set pindirs, 1",
         ".wrap_target",
         "out pins, 1",
         ".wrap"
@@ -275,7 +278,9 @@ async fn main(_spawner: Spawner) {
 
     // Initial clock divider for default sample rate
     let initial_rate = STATE.lock(|s| s.borrow().sample_rate);
-    cfg.clock_divider = (125_000_000u32 as f32 / initial_rate as f32).to_fixed();
+    let sys_freq = clk_sys_freq();
+    info!("System clock: {} Hz, sample rate: {} Hz", sys_freq, initial_rate);
+    cfg.clock_divider = (sys_freq as f32 / initial_rate as f32).to_fixed();
 
     // Shift out MSB first, autopull at 32 bits
     cfg.shift_out = ShiftConfig {
@@ -288,6 +293,8 @@ async fn main(_spawner: Spawner) {
 
     sm0.set_config(&cfg);
     sm0.set_pin_dirs(embassy_rp::pio::Direction::Out, &[&out_pin]);
+
+    info!("PIO configured: out_pin={}, set_pin={}", out_pin.pin(), out_pin.pin());
 
     info!("USB device ready");
 
