@@ -1,10 +1,11 @@
-name: Build Firmware
+name: Build
 
 on:
   push:
     branches: [main]
     paths:
       - 'firmware/**'
+      - 'client/**'
       - 'shared/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -13,6 +14,7 @@ on:
     branches: [main]
     paths:
       - 'firmware/**'
+      - 'client/**'
       - 'shared/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -20,7 +22,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-firmware:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -41,7 +43,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.board }}
+          key: firmware-${{ matrix.board }}
 
       - name: Install elf2uf2-rs
         run: cargo install elf2uf2-rs
@@ -64,8 +66,59 @@ jobs:
           name: picostream-${{ matrix.board }}.uf2
           path: picostream-${{ matrix.board }}.uf2
 
+  build-client:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            cross: true
+          - target: armv7-unknown-linux-gnueabihf
+            arch: armv7
+            cross: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: client-${{ matrix.arch }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build client (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release -p picostream --target ${{ matrix.target }}
+
+      - name: Build client (cross)
+        if: matrix.cross
+        run: cross build --release -p picostream --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: |
+          cp target/${{ matrix.target }}/release/picostream \
+            picostream-linux-${{ matrix.arch }}
+
+      - name: Upload client artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: picostream-linux-${{ matrix.arch }}
+          path: picostream-linux-${{ matrix.arch }}
+
   release:
-    needs: build
+    needs: [build-firmware, build-client]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
 
@@ -75,9 +128,15 @@ jobs:
         with:
           path: artifacts
 
+      - name: List artifacts
+        run: find artifacts -type f
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/picostream-rp2040.uf2/picostream-rp2040.uf2
             artifacts/picostream-rp235x.uf2/picostream-rp235x.uf2
+            artifacts/picostream-linux-x86_64/picostream-linux-x86_64
+            artifacts/picostream-linux-aarch64/picostream-linux-aarch64
+            artifacts/picostream-linux-armv7/picostream-linux-armv7
