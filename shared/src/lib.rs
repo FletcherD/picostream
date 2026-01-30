@@ -18,8 +18,11 @@ pub const REQ_SET_SAMPLE_RATE: u8 = 0x01;
 /// Vendor control request: Start streaming
 pub const REQ_START: u8 = 0x02;
 
-/// Vendor control request: Stop streaming
+/// Vendor control request: Stop streaming immediately
 pub const REQ_STOP: u8 = 0x03;
+
+/// Vendor control request: Drain buffer then stop (for clean EOF)
+pub const REQ_DRAIN_AND_STOP: u8 = 0x04;
 
 /// Vendor control request: Get status (returns BufferStatus)
 pub const REQ_GET_STATUS: u8 = 0x10;

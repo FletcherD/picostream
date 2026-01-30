@@ -49,10 +49,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Streaming started");
 
     // Stream data from stdin
-    let result = stream_data(&interface, running.clone(), !args.quiet);
+    let (result, eof_reached, total_bytes_sent) =
+        stream_data(&interface, running.clone(), !args.quiet);
 
-    // Stop streaming
-    stop_streaming(&interface)?;
+    // Stop streaming - use drain_and_stop for clean EOF, immediate stop for interrupt
+    if eof_reached && running.load(Ordering::SeqCst) {
+        drain_and_stop(&interface, !args.quiet, total_bytes_sent)?;
+    } else {
+        stop_streaming(&interface)?;
+    }
     eprintln!("\nStreaming stopped");
 
     // Print final status
@@ -131,6 +136,40 @@ fn stop_streaming(interface: &nusb::Interface) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+fn drain_and_stop(
+    interface: &nusb::Interface,
+    show_status: bool,
+    total_sent: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Tell firmware to drain buffer then stop
+    interface
+        .control_out(
+            ControlOut {
+                control_type: ControlType::Vendor,
+                recipient: Recipient::Interface,
+                request: REQ_DRAIN_AND_STOP,
+                value: 0,
+                index: 0,
+                data: &[],
+            },
+            Duration::from_secs(1),
+        )
+        .wait()?;
+
+    // Wait for firmware to finish draining (is_running becomes false)
+    loop {
+        let status = get_status(interface)?;
+        if status.is_running == 0 {
+            break;
+        }
+        if show_status {
+            display_status(&status, total_sent);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
 fn get_status(interface: &nusb::Interface) -> Result<BufferStatus, Box<dyn std::error::Error>> {
     let data = interface
         .control_in(
@@ -152,7 +191,7 @@ fn stream_data(
     interface: &nusb::Interface,
     running: Arc<AtomicBool>,
     show_status: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> (Result<(), Box<dyn std::error::Error>>, bool, u64) {
     let stdin = io::stdin();
     let stdin_fd = stdin.as_raw_fd();
 
@@ -165,10 +204,10 @@ fn stream_data(
     let mut stdin = stdin.lock();
 
     // Get bulk OUT endpoint with writer interface
-    let mut writer = interface
-        .endpoint::<Bulk, Out>(EP_BULK_OUT)?
-        .writer(4096)
-        .with_num_transfers(8);
+    let mut writer = match interface.endpoint::<Bulk, Out>(EP_BULK_OUT) {
+        Ok(ep) => ep.writer(4096).with_num_transfers(8),
+        Err(e) => return (Err(e.into()), false, 0),
+    };
 
     // Buffer for reading from stdin
     let mut read_buf = [0u8; 4096];
@@ -188,7 +227,9 @@ fn stream_data(
             }
             Ok(n) => {
                 // Write to USB
-                writer.write_all(&read_buf[..n])?;
+                if let Err(e) = writer.write_all(&read_buf[..n]) {
+                    return (Err(e.into()), eof_reached, total_bytes_sent);
+                }
                 total_bytes_sent += n as u64;
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -215,24 +256,12 @@ fn stream_data(
 
     // Flush remaining data if not interrupted
     if running.load(Ordering::SeqCst) {
-        writer.flush()?;
-    }
-
-    // Wait for device buffer to drain (only if EOF, not if interrupted)
-    if eof_reached && running.load(Ordering::SeqCst) {
-        loop {
-            let status = get_status(interface)?;
-            if status.bytes_used == 0 || !running.load(Ordering::SeqCst) {
-                break;
-            }
-            if show_status {
-                display_status(&status, total_bytes_sent);
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        if let Err(e) = writer.flush() {
+            return (Err(e.into()), eof_reached, total_bytes_sent);
         }
     }
 
-    Ok(())
+    (Ok(()), eof_reached, total_bytes_sent)
 }
 
 fn display_status(status: &BufferStatus, total_sent: u64) {

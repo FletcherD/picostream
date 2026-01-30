@@ -39,6 +39,7 @@ bind_interrupts!(struct Irqs {
 struct DeviceState {
     sample_rate: u32,
     is_running: bool,
+    is_draining: bool,
     underrun_count: u32,
     ring_buffer: RingBuffer,
 }
@@ -48,6 +49,7 @@ impl DeviceState {
         Self {
             sample_rate: 1_000_000,
             is_running: false,
+            is_draining: false,
             underrun_count: 0,
             ring_buffer: RingBuffer::new(),
         }
@@ -156,6 +158,7 @@ impl Handler for ControlHandler {
                 STATE.lock(|s| {
                     let mut state = s.borrow_mut();
                     state.is_running = true;
+                    state.is_draining = false;
                     state.underrun_count = 0;
                     state.ring_buffer.clear();
                 });
@@ -169,11 +172,20 @@ impl Handler for ControlHandler {
                 STATE.lock(|s| {
                     let mut state = s.borrow_mut();
                     state.is_running = false;
+                    state.is_draining = false;
                     state.ring_buffer.clear();
                 });
                 CONFIG_CHANGED.store(true, Ordering::Release);
                 // Wake USB receiver (buffer cleared, can accept new data for next start)
                 SPACE_AVAILABLE.signal(());
+                Some(OutResponse::Accepted)
+            }
+            REQ_DRAIN_AND_STOP => {
+                info!("Drain and stop");
+                STATE.lock(|s| {
+                    s.borrow_mut().is_draining = true;
+                });
+                CONFIG_CHANGED.store(true, Ordering::Release);
                 Some(OutResponse::Accepted)
             }
             _ => {
@@ -410,19 +422,40 @@ async fn pio_feeder(
             continue;
         }
 
-        // Check how much data is available
-        let available = STATE.lock(|s| s.borrow().ring_buffer.available_data());
+        // Check how much data is available and draining state
+        let (available, is_draining) = STATE.lock(|s| {
+            let state = s.borrow();
+            (state.ring_buffer.available_data(), state.is_draining)
+        });
 
         if available < 4 {
             // Not enough data for even one word
-            // Check for underrun
             let (_, tx) = sm.rx_tx();
-            if tx.empty() {
-                STATE.lock(|s| {
-                    s.borrow_mut().underrun_count += 1;
-                });
-                debug!("Underrun detected");
+
+            if is_draining {
+                // Draining mode: wait for TX FIFO to empty, then stop
+                if tx.empty() {
+                    info!("Drain complete");
+                    STATE.lock(|s| {
+                        let mut state = s.borrow_mut();
+                        state.is_running = false;
+                        state.is_draining = false;
+                    });
+                    CONFIG_CHANGED.store(true, Ordering::Release);
+                    SPACE_AVAILABLE.signal(());
+                    continue;
+                }
+                // Still draining TX FIFO, wait a bit
+            } else {
+                // Normal mode: check for actual underrun (PIO stalled)
+                if tx.stalled() {
+                    STATE.lock(|s| {
+                        s.borrow_mut().underrun_count += 1;
+                    });
+                    debug!("Underrun detected");
+                }
             }
+
             // Wait for more data (with short timeout to stay responsive)
             let _ = select(
                 DATA_AVAILABLE.wait(),

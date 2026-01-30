@@ -26,7 +26,7 @@ pico-bitstream/
 Common definitions shared between firmware and client:
 - USB VID/PID (0x1209/0x0001)
 - Endpoint addresses (0x01 OUT, 0x81 IN)
-- Control request codes (SET_SAMPLE_RATE, START, STOP, GET_STATUS)
+- Control request codes (SET_SAMPLE_RATE, START, STOP, DRAIN_AND_STOP, GET_STATUS)
 - `BufferStatus` struct with to_bytes/from_bytes serialization
 - Constants (32KB ring buffer, GPIO 0, 125MHz clock)
 
@@ -49,7 +49,8 @@ Desktop CLI using nusb 0.2:
 - Control requests for configuration
 - Bulk OUT streaming with backpressure (8 pending transfers)
 - Status display on stderr (~10 Hz updates)
-- Ctrl-C and EOF handling
+- Clean EOF handling: uses DRAIN_AND_STOP to wait for firmware buffer to empty
+- Ctrl-C handling: uses immediate STOP
 
 ## Building & Flashing
 
@@ -77,14 +78,14 @@ cargo build --release -p pico-bitstream
 ## Usage
 
 ```bash
-# Stream 1MHz bitstream
-echo -ne '\xAA\xAA\xAA\xAA' | ./target/release/pico-bitstream -s 1000000
-
 # Continuous streaming from file
 cat data.bin | ./target/release/pico-bitstream -s 100000
 
-# Test 500Hz square wave (0xAA = 10101010 at 1kHz = 500Hz fundamental)
-echo -ne '\xAA\xAA' | ./target/release/pico-bitstream -s 1000
+# Continuous 500kHz square wave (0x55 = 01010101 at 1MHz = 500kHz fundamental)
+cat /dev/zero | tr '\0' $'\x55' | ./target/release/pico-bitstream -s 1000000
+
+# Send a few seconds of 500kHz square wave
+dd if=/dev/zero bs=4096 count=256 2>/dev/null | tr '\0' $'\x55' | ./target/release/pico-bitstream -s 1000000
 ```
 
 ## USB Protocol
@@ -93,7 +94,8 @@ echo -ne '\xAA\xAA' | ./target/release/pico-bitstream -s 1000
 |---------|------|-----------|------|-------------|
 | SET_SAMPLE_RATE | 0x01 | OUT | u32 LE | Set output rate in Hz |
 | START | 0x02 | OUT | none | Start streaming, clear buffer and underrun count |
-| STOP | 0x03 | OUT | none | Stop streaming, clear buffer |
+| STOP | 0x03 | OUT | none | Stop streaming immediately, clear buffer |
+| DRAIN_AND_STOP | 0x04 | OUT | none | Wait for buffer to drain, then stop (for clean EOF) |
 | GET_STATUS | 0x10 | IN | BufferStatus | Get buffer status |
 
 BufferStatus (16 bytes):
@@ -132,6 +134,7 @@ nusb examples at `/home/fletcher/RustroverProjects/nusb/examples/`:
 
 **Firmware architecture:**
 - `DeviceState` in `Mutex<CriticalSectionRawMutex, RefCell<...>>` for shared state
+  - Includes `is_draining` flag for clean EOF handling
 - `ControlHandler` implements `embassy_usb::Handler` for vendor requests (sync callbacks)
 - Two independent async tasks for decoupled USB/PIO operation:
   - `usb_receiver`: USB bulk OUT → ring buffer (waits for space before reading)
@@ -141,6 +144,8 @@ nusb examples at `/home/fletcher/RustroverProjects/nusb/examples/`:
   - `SPACE_AVAILABLE`: PIO feeder signals USB receiver after draining data
 - Backpressure: USB receiver waits for buffer space before calling `ep.read()`, causing USB host to NAK
 - START/STOP control requests clear the ring buffer and signal `SPACE_AVAILABLE` to wake tasks
+- Underrun detection uses `tx.stalled()` (PIO TXSTALL flag) for accurate detection - only counts when PIO actually stalls waiting for data, not just when TX FIFO is empty
+- DRAIN_AND_STOP sets `is_draining` flag; when buffer empties, PIO stops without counting underruns
 
 **PIO configuration:**
 - Program: `set pindirs, 1` (runs once) then `out pins, 1` in wrap loop
@@ -224,11 +229,3 @@ Captures GPIO output using Sipeed SLogic16 and applies sigrok timing decoder:
 - Records 2s of D0 at 5MHz sample rate
 - Applies timing decoder to show edge timing
 - Cleans up on exit
-
-### Interpreting Client Status
-```
-[----------]   0% |   0.0 KB/32 KB | 0 underruns | sent: 480.0 KB
-```
-- `0.0 KB/32 KB`: Buffer fill level (low means data flows through quickly)
-- `0 underruns`: PIO stalls waiting for data
-- `sent: 480.0 KB`: Total bytes sent to device

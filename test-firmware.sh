@@ -20,6 +20,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+DEFMT_LOG=debug cargo build -p pico-bitstream-firmware \
+    --target thumbv8m.main-none-eabihf \
+    --no-default-features --features rp235x \
+    --release 2>&1 > /dev/null
+
 echo "=== Flashing and running firmware ==="
 echo "Firmware log: $FIRMWARE_LOG"
 
@@ -58,7 +63,7 @@ echo ""
 echo "=== Sending test data ==="
 echo "Client log: $CLIENT_LOG"
 
-# Send test pattern: 0xAA repeated (creates 500Hz square wave at 1kHz sample rate)
+# Send test pattern: 0xAA repeated (creates 500kHz square wave at 1MHz sample rate)
 
 dd if=/dev/zero bs=4096 count=256 2>/dev/null | tr '\0' $'\x55' | ./target/release/pico-bitstream -s 1000000 \
     > "$CLIENT_LOG" 2>&1
