@@ -1,0 +1,83 @@
+name: Build Firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firmware/**'
+      - 'shared/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/build-firmware.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'firmware/**'
+      - 'shared/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/build-firmware.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - board: rp2040
+            target: thumbv6m-none-eabi
+          - board: rp235x
+            target: thumbv8m.main-none-eabihf
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.board }}
+
+      - name: Install elf2uf2-rs
+        run: cargo install elf2uf2-rs
+
+      - name: Build firmware
+        run: |
+          cargo build --release -p picostream-firmware \
+            --target ${{ matrix.target }} \
+            --features ${{ matrix.board }}
+
+      - name: Convert to UF2
+        run: |
+          elf2uf2-rs \
+            target/${{ matrix.target }}/release/picostream-firmware \
+            picostream-${{ matrix.board }}.uf2
+
+      - name: Upload UF2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: picostream-${{ matrix.board }}.uf2
+          path: picostream-${{ matrix.board }}.uf2
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/picostream-rp2040.uf2/picostream-rp2040.uf2
+            artifacts/picostream-rp235x.uf2/picostream-rp235x.uf2
