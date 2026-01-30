@@ -11,6 +11,7 @@ use embassy_executor::Spawner;
 use embassy_futures::join::join3;
 use embassy_futures::select::select;
 use embassy_rp::bind_interrupts;
+use embassy_rp::gpio::{Level, Output};
 use embassy_rp::Peri;
 use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::pio::program::pio_asm;
@@ -342,12 +343,17 @@ async fn main(_spawner: Spawner) {
     let sm_config = SM_CONFIG.init(cfg);
 
     info!("PIO configured");
+
+    // LED on GPIO 25 (active high on Pico/Pico 2)
+    let led = Output::new(p.PIN_25, Level::Low);
+    info!("LED configured on GPIO 25");
+
     info!("USB device ready");
 
     // Run USB device, USB receiver, and PIO feeder concurrently
     let usb_fut = usb.run();
     let usb_receiver_fut = usb_receiver(&mut ep_out);
-    let pio_feeder_fut = pio_feeder(sm0, sm_config, p.DMA_CH0, out_pin);
+    let pio_feeder_fut = pio_feeder(sm0, sm_config, p.DMA_CH0, out_pin, led);
 
     join3(usb_fut, usb_receiver_fut, pio_feeder_fut).await;
 }
@@ -409,6 +415,7 @@ async fn pio_feeder(
     cfg: &'static Config<'static, PIO0>,
     mut dma: Peri<'static, DMA_CH0>,
     out_pin: embassy_rp::pio::Pin<'static, PIO0>,
+    mut led: Output<'static>,
 ) {
     // Apply config and set pin direction
     sm.set_config(cfg);
@@ -445,12 +452,14 @@ async fn pio_feeder(
 
         if is_running && !pio_running {
             sm.set_enable(true);
+            led.set_high();
             pio_running = true;
-            info!("PIO enabled");
+            info!("PIO enabled, LED on");
         } else if !is_running && pio_running {
             sm.set_enable(false);
+            led.set_low();
             pio_running = false;
-            info!("PIO disabled");
+            info!("PIO disabled, LED off");
         }
 
         if !pio_running {
