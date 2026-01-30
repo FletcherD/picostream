@@ -14,10 +14,10 @@ use picostream_shared::*;
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 enum InputFormat {
-    /// Packed bytes (default)
-    #[default]
+    /// Packed bytes
     Bytes,
-    /// ASCII '0' and '1' characters (whitespace ignored)
+    /// ASCII '0' and '1' characters, whitespace ignored (default)
+    #[default]
     Bits,
 }
 
@@ -31,7 +31,7 @@ struct Args {
     sample_rate: u32,
 
     /// Input format
-    #[arg(short = 'f', long = "format", default_value = "bytes")]
+    #[arg(short = 'f', long = "format", default_value = "bits")]
     format: InputFormat,
 
     /// Read input from file

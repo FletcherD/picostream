@@ -30,12 +30,6 @@ pub const REQ_GET_STATUS: u8 = 0x10;
 /// Ring buffer size in bytes (32KB)
 pub const RING_BUFFER_SIZE: usize = 32 * 1024;
 
-/// GPIO pin for bitstream output
-pub const OUTPUT_GPIO: u8 = 0;
-
-/// System clock frequency in Hz
-pub const SYSTEM_CLOCK_HZ: u32 = 125_000_000;
-
 /// USB bulk transfer size
 pub const BULK_PACKET_SIZE: usize = 64;
 

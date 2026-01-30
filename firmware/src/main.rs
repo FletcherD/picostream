@@ -32,6 +32,12 @@ use picostream_shared::*;
 
 use {defmt_rtt as _, panic_probe as _};
 
+// ============================================================================
+// CONFIGURATION - Change this to use a different GPIO pin for output
+// Note: Also update the `p.PIN_X` reference in main() to match
+// ============================================================================
+const OUTPUT_PIN: u8 = 0;
+
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
     PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
@@ -246,7 +252,7 @@ impl Handler for ControlHandler {
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
-    info!("picostream starting");
+    info!("picostream starting (output on GPIO {})", OUTPUT_PIN);
 
     let p = embassy_rp::init(Default::default());
 
