@@ -15,8 +15,8 @@ pub const EP_BULK_IN: u8 = 0x81;
 /// Vendor control request: Set sample rate (value = rate in Hz, as u32 in data)
 pub const REQ_SET_SAMPLE_RATE: u8 = 0x01;
 
-/// Vendor control request: Start streaming
-pub const REQ_START: u8 = 0x02;
+/// Vendor control request: Start streaming when buffer is full (or on DRAIN_AND_STOP for small transfers)
+pub const REQ_START_WHEN_FULL: u8 = 0x02;
 
 /// Vendor control request: Stop streaming immediately
 pub const REQ_STOP: u8 = 0x03;

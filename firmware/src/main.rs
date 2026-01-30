@@ -40,6 +40,7 @@ struct DeviceState {
     sample_rate: u32,
     is_running: bool,
     is_draining: bool,
+    waiting_to_start: bool,
     underrun_count: u32,
     ring_buffer: RingBuffer,
 }
@@ -50,6 +51,7 @@ impl DeviceState {
             sample_rate: 1_000_000,
             is_running: false,
             is_draining: false,
+            waiting_to_start: false,
             underrun_count: 0,
             ring_buffer: RingBuffer::new(),
         }
@@ -153,11 +155,12 @@ impl Handler for ControlHandler {
                     Some(OutResponse::Rejected)
                 }
             }
-            REQ_START => {
-                info!("Start streaming");
+            REQ_START_WHEN_FULL => {
+                info!("Start when full requested");
                 STATE.lock(|s| {
                     let mut state = s.borrow_mut();
-                    state.is_running = true;
+                    state.waiting_to_start = true;
+                    state.is_running = false;
                     state.is_draining = false;
                     state.underrun_count = 0;
                     state.ring_buffer.clear();
@@ -173,6 +176,7 @@ impl Handler for ControlHandler {
                     let mut state = s.borrow_mut();
                     state.is_running = false;
                     state.is_draining = false;
+                    state.waiting_to_start = false;
                     state.ring_buffer.clear();
                 });
                 CONFIG_CHANGED.store(true, Ordering::Release);
@@ -183,7 +187,14 @@ impl Handler for ControlHandler {
             REQ_DRAIN_AND_STOP => {
                 info!("Drain and stop");
                 STATE.lock(|s| {
-                    s.borrow_mut().is_draining = true;
+                    let mut state = s.borrow_mut();
+                    // If waiting to start (small transfer case), start now
+                    if state.waiting_to_start {
+                        info!("Starting PIO (drain triggered)");
+                        state.waiting_to_start = false;
+                        state.is_running = true;
+                    }
+                    state.is_draining = true;
                 });
                 CONFIG_CHANGED.store(true, Ordering::Release);
                 Some(OutResponse::Accepted)
@@ -355,10 +366,23 @@ async fn usb_receiver(ep: &mut impl EndpointOut) {
         match ep.read(&mut buf).await {
             Ok(n) => {
                 if n > 0 {
-                    // Push data to ring buffer (guaranteed to fit since we checked space)
-                    STATE.lock(|s| {
-                        s.borrow_mut().ring_buffer.push(&buf[..n]);
+                    // Push data to ring buffer and check if we should start
+                    let should_start = STATE.lock(|s| {
+                        let mut state = s.borrow_mut();
+                        state.ring_buffer.push(&buf[..n]);
+                        // Start if waiting and buffer is now full
+                        if state.waiting_to_start && state.ring_buffer.available_space() == 0 {
+                            state.waiting_to_start = false;
+                            state.is_running = true;
+                            true
+                        } else {
+                            false
+                        }
                     });
+                    if should_start {
+                        info!("Starting PIO (buffer full)");
+                        CONFIG_CHANGED.store(true, Ordering::Release);
+                    }
                     // Signal that new data is available
                     DATA_AVAILABLE.signal(());
                 }

@@ -108,7 +108,7 @@ fn start_streaming(interface: &nusb::Interface) -> Result<(), Box<dyn std::error
             ControlOut {
                 control_type: ControlType::Vendor,
                 recipient: Recipient::Interface,
-                request: REQ_START,
+                request: REQ_START_WHEN_FULL,
                 value: 0,
                 index: 0,
                 data: &[],

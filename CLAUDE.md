@@ -26,7 +26,7 @@ pico-bitstream/
 Common definitions shared between firmware and client:
 - USB VID/PID (0x1209/0x0001)
 - Endpoint addresses (0x01 OUT, 0x81 IN)
-- Control request codes (SET_SAMPLE_RATE, START, STOP, DRAIN_AND_STOP, GET_STATUS)
+- Control request codes (SET_SAMPLE_RATE, START_WHEN_FULL, STOP, DRAIN_AND_STOP, GET_STATUS)
 - `BufferStatus` struct with to_bytes/from_bytes serialization
 - Constants (32KB ring buffer, GPIO 0, 125MHz clock)
 
@@ -93,15 +93,15 @@ dd if=/dev/zero bs=4096 count=256 2>/dev/null | tr '\0' $'\x55' | ./target/relea
 | Request | Code | Direction | Data | Description |
 |---------|------|-----------|------|-------------|
 | SET_SAMPLE_RATE | 0x01 | OUT | u32 LE | Set output rate in Hz |
-| START | 0x02 | OUT | none | Start streaming, clear buffer and underrun count |
+| START_WHEN_FULL | 0x02 | OUT | none | Begin buffering; PIO starts when buffer full or DRAIN_AND_STOP received |
 | STOP | 0x03 | OUT | none | Stop streaming immediately, clear buffer |
-| DRAIN_AND_STOP | 0x04 | OUT | none | Wait for buffer to drain, then stop (for clean EOF) |
+| DRAIN_AND_STOP | 0x04 | OUT | none | Start PIO if buffering, then drain and stop (for clean EOF) |
 | GET_STATUS | 0x10 | IN | BufferStatus | Get buffer status |
 
 BufferStatus (16 bytes):
 - bytes_used: u32 - bytes currently in buffer
 - buffer_size: u32 - total buffer capacity (32768)
-- underrun_count: u32 - underruns since last START
+- underrun_count: u32 - underruns since last START_WHEN_FULL
 - is_running: u8 - streaming active flag
 - _reserved: [u8; 3]
 
@@ -134,7 +134,8 @@ nusb examples at `/home/fletcher/RustroverProjects/nusb/examples/`:
 
 **Firmware architecture:**
 - `DeviceState` in `Mutex<CriticalSectionRawMutex, RefCell<...>>` for shared state
-  - Includes `is_draining` flag for clean EOF handling
+  - `waiting_to_start`: set by START_WHEN_FULL, cleared when PIO starts
+  - `is_draining`: set by DRAIN_AND_STOP for clean EOF handling
 - `ControlHandler` implements `embassy_usb::Handler` for vendor requests (sync callbacks)
 - Two independent async tasks for decoupled USB/PIO operation:
   - `usb_receiver`: USB bulk OUT → ring buffer (waits for space before reading)
@@ -143,7 +144,10 @@ nusb examples at `/home/fletcher/RustroverProjects/nusb/examples/`:
   - `DATA_AVAILABLE`: USB receiver signals PIO feeder when new data arrives
   - `SPACE_AVAILABLE`: PIO feeder signals USB receiver after draining data
 - Backpressure: USB receiver waits for buffer space before calling `ep.read()`, causing USB host to NAK
-- START/STOP control requests clear the ring buffer and signal `SPACE_AVAILABLE` to wake tasks
+- Delayed start to prevent initial underruns at high sample rates:
+  - START_WHEN_FULL sets `waiting_to_start` and clears the buffer
+  - PIO starts when buffer becomes full (USB receiver detects this)
+  - For small transfers (< 32KB), DRAIN_AND_STOP triggers the start
 - Underrun detection uses `tx.stalled()` (PIO TXSTALL flag) for accurate detection - only counts when PIO actually stalls waiting for data, not just when TX FIFO is empty
 - DRAIN_AND_STOP sets `is_draining` flag; when buffer empties, PIO stops without counting underruns
 
