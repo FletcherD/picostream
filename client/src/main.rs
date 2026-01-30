@@ -1,5 +1,7 @@
-use std::io::{self, Read, Write};
+use std::fs::File;
+use std::io::{self, BufReader, Read, Write};
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,6 +24,7 @@ enum InputFormat {
 #[derive(Parser, Debug)]
 #[command(name = "picostream")]
 #[command(about = "Stream digital bitstream to RP2040/RP235x GPIO")]
+#[command(after_help = "By default, input is read from stdin.")]
 struct Args {
     /// Sample rate in Hz
     #[arg(short = 's', long = "sample-rate")]
@@ -31,6 +34,18 @@ struct Args {
     #[arg(short = 'f', long = "format", default_value = "bytes")]
     format: InputFormat,
 
+    /// Read input from file
+    #[arg(short = 'i', long = "file", conflicts_with = "data")]
+    file: Option<PathBuf>,
+
+    /// Use string as input data
+    #[arg(short = 'd', long = "data", conflicts_with = "file")]
+    data: Option<String>,
+
+    /// Loop input continuously (requires --file or --data)
+    #[arg(short = 'l', long = "loop")]
+    loop_input: bool,
+
     /// Skip status display
     #[arg(long)]
     quiet: bool,
@@ -38,6 +53,11 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+
+    // Validate: --loop requires --file or --data
+    if args.loop_input && args.file.is_none() && args.data.is_none() {
+        return Err("--loop requires --file or --data".into());
+    }
 
     // Setup Ctrl-C handler
     let running = Arc::new(AtomicBool::new(true));
@@ -61,9 +81,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     start_streaming(&interface)?;
     eprintln!("Streaming started");
 
-    // Stream data from stdin
-    let (result, eof_reached, total_bytes_sent) =
-        stream_data(&interface, running.clone(), !args.quiet, args.format);
+    // Stream data from the appropriate source
+    let (result, eof_reached, total_bytes_sent) = if let Some(ref data) = args.data {
+        stream_from_data(&interface, running.clone(), !args.quiet, args.format, data, args.loop_input)
+    } else if let Some(ref path) = args.file {
+        stream_from_file(&interface, running.clone(), !args.quiet, args.format, path, args.loop_input)
+    } else {
+        stream_from_stdin(&interface, running.clone(), !args.quiet, args.format)
+    };
 
     // Stop streaming - use drain_and_stop for clean EOF, immediate stop for interrupt
     if eof_reached && running.load(Ordering::SeqCst) {
@@ -200,7 +225,56 @@ fn get_status(interface: &nusb::Interface) -> Result<BufferStatus, Box<dyn std::
     BufferStatus::from_bytes(&data).ok_or("Invalid status response".into())
 }
 
-fn stream_data(
+/// Convert input bytes to packed bytes based on format
+fn process_input(input: &[u8], format: InputFormat, bit_state: &mut BitState) -> Result<Vec<u8>, String> {
+    match format {
+        InputFormat::Bytes => Ok(input.to_vec()),
+        InputFormat::Bits => {
+            let mut packed = Vec::new();
+            for &byte in input {
+                let ch = byte as char;
+                match ch {
+                    '0' => {
+                        bit_state.accumulator = (bit_state.accumulator << 1) | 0;
+                        bit_state.count += 1;
+                    }
+                    '1' => {
+                        bit_state.accumulator = (bit_state.accumulator << 1) | 1;
+                        bit_state.count += 1;
+                    }
+                    ' ' | '\t' | '\n' | '\r' => {}
+                    _ => return Err(format!("Invalid character in bits mode: {:?}", ch)),
+                }
+                if bit_state.count == 8 {
+                    packed.push(bit_state.accumulator);
+                    bit_state.accumulator = 0;
+                    bit_state.count = 0;
+                }
+            }
+            Ok(packed)
+        }
+    }
+}
+
+/// Flush remaining bits (pad with zeros)
+fn flush_bits(bit_state: &mut BitState) -> Option<u8> {
+    if bit_state.count > 0 {
+        let byte = bit_state.accumulator << (8 - bit_state.count);
+        bit_state.accumulator = 0;
+        bit_state.count = 0;
+        Some(byte)
+    } else {
+        None
+    }
+}
+
+#[derive(Default)]
+struct BitState {
+    accumulator: u8,
+    count: u8,
+}
+
+fn stream_from_stdin(
     interface: &nusb::Interface,
     running: Arc<AtomicBool>,
     show_status: bool,
@@ -217,34 +291,24 @@ fn stream_data(
 
     let mut stdin = stdin.lock();
 
-    // Get bulk OUT endpoint with writer interface
     let mut writer = match interface.endpoint::<Bulk, Out>(EP_BULK_OUT) {
         Ok(ep) => ep.writer(4096).with_num_transfers(8),
         Err(e) => return (Err(e.into()), false, 0),
     };
 
-    // Buffer for reading from stdin
     let mut read_buf = [0u8; 4096];
-
     let mut last_status_time = Instant::now();
     let status_interval = Duration::from_millis(100);
-
     let mut eof_reached = false;
     let mut total_bytes_sent: u64 = 0;
-
-    // State for bits mode
-    let mut bit_accumulator: u8 = 0;
-    let mut bits_collected: u8 = 0;
+    let mut bit_state = BitState::default();
 
     while running.load(Ordering::SeqCst) && !eof_reached {
-        // Read from stdin (non-blocking)
         match stdin.read(&mut read_buf) {
             Ok(0) => {
                 eof_reached = true;
-                // In bits mode, flush any remaining bits (padded with zeros)
-                if matches!(format, InputFormat::Bits) && bits_collected > 0 {
-                    bit_accumulator <<= 8 - bits_collected;
-                    if let Err(e) = writer.write_all(&[bit_accumulator]) {
+                if let Some(byte) = flush_bits(&mut bit_state) {
+                    if let Err(e) = writer.write_all(&[byte]) {
                         return (Err(e.into()), eof_reached, total_bytes_sent);
                     }
                     total_bytes_sent += 1;
@@ -252,62 +316,87 @@ fn stream_data(
                 eprintln!("\nEOF reached, draining buffer...");
             }
             Ok(n) => {
-                match format {
-                    InputFormat::Bytes => {
-                        if let Err(e) = writer.write_all(&read_buf[..n]) {
-                            return (Err(e.into()), eof_reached, total_bytes_sent);
-                        }
-                        total_bytes_sent += n as u64;
-                    }
-                    InputFormat::Bits => {
-                        let mut packed_bytes = Vec::new();
-                        for &byte in &read_buf[..n] {
-                            let ch = byte as char;
-                            match ch {
-                                '0' => {
-                                    bit_accumulator = (bit_accumulator << 1) | 0;
-                                    bits_collected += 1;
-                                }
-                                '1' => {
-                                    bit_accumulator = (bit_accumulator << 1) | 1;
-                                    bits_collected += 1;
-                                }
-                                // Ignore whitespace and newlines
-                                ' ' | '\t' | '\n' | '\r' => {}
-                                _ => {
-                                    return (
-                                        Err(format!("Invalid character in bits mode: {:?}", ch).into()),
-                                        eof_reached,
-                                        total_bytes_sent,
-                                    );
-                                }
-                            }
-                            if bits_collected == 8 {
-                                packed_bytes.push(bit_accumulator);
-                                bit_accumulator = 0;
-                                bits_collected = 0;
-                            }
-                        }
-                        if !packed_bytes.is_empty() {
-                            if let Err(e) = writer.write_all(&packed_bytes) {
+                match process_input(&read_buf[..n], format, &mut bit_state) {
+                    Ok(packed) => {
+                        if !packed.is_empty() {
+                            if let Err(e) = writer.write_all(&packed) {
                                 return (Err(e.into()), eof_reached, total_bytes_sent);
                             }
-                            total_bytes_sent += packed_bytes.len() as u64;
+                            total_bytes_sent += packed.len() as u64;
                         }
                     }
+                    Err(e) => return (Err(e.into()), eof_reached, total_bytes_sent),
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // No data available, sleep briefly and check running flag
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
-                continue;
-            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => {
                 eprintln!("\nStdin read error: {}", e);
                 break;
             }
+        }
+
+        if show_status && last_status_time.elapsed() >= status_interval {
+            if let Ok(status) = get_status(interface) {
+                display_status(&status, total_bytes_sent);
+            }
+            last_status_time = Instant::now();
+        }
+    }
+
+    if running.load(Ordering::SeqCst) {
+        if let Err(e) = writer.flush() {
+            return (Err(e.into()), eof_reached, total_bytes_sent);
+        }
+    }
+
+    (Ok(()), eof_reached, total_bytes_sent)
+}
+
+fn stream_from_data(
+    interface: &nusb::Interface,
+    running: Arc<AtomicBool>,
+    show_status: bool,
+    format: InputFormat,
+    data: &str,
+    loop_input: bool,
+) -> (Result<(), Box<dyn std::error::Error>>, bool, u64) {
+    let mut writer = match interface.endpoint::<Bulk, Out>(EP_BULK_OUT) {
+        Ok(ep) => ep.writer(4096).with_num_transfers(8),
+        Err(e) => return (Err(e.into()), false, 0),
+    };
+
+    let mut last_status_time = Instant::now();
+    let status_interval = Duration::from_millis(100);
+    let mut total_bytes_sent: u64 = 0;
+
+    loop {
+        let mut bit_state = BitState::default();
+
+        match process_input(data.as_bytes(), format, &mut bit_state) {
+            Ok(packed) => {
+                if !packed.is_empty() {
+                    if let Err(e) = writer.write_all(&packed) {
+                        return (Err(e.into()), !loop_input, total_bytes_sent);
+                    }
+                    total_bytes_sent += packed.len() as u64;
+                }
+            }
+            Err(e) => return (Err(e.into()), false, total_bytes_sent),
+        }
+
+        // Flush remaining bits
+        if let Some(byte) = flush_bits(&mut bit_state) {
+            if let Err(e) = writer.write_all(&[byte]) {
+                return (Err(e.into()), !loop_input, total_bytes_sent);
+            }
+            total_bytes_sent += 1;
+        }
+
+        if !loop_input || !running.load(Ordering::SeqCst) {
+            break;
         }
 
         // Update status display periodically
@@ -319,14 +408,99 @@ fn stream_data(
         }
     }
 
-    // Flush remaining data if not interrupted
     if running.load(Ordering::SeqCst) {
         if let Err(e) = writer.flush() {
-            return (Err(e.into()), eof_reached, total_bytes_sent);
+            return (Err(e.into()), !loop_input, total_bytes_sent);
+        }
+        if !loop_input {
+            eprintln!("\nData sent, draining buffer...");
         }
     }
 
-    (Ok(()), eof_reached, total_bytes_sent)
+    (Ok(()), !loop_input, total_bytes_sent)
+}
+
+fn stream_from_file(
+    interface: &nusb::Interface,
+    running: Arc<AtomicBool>,
+    show_status: bool,
+    format: InputFormat,
+    path: &PathBuf,
+    loop_input: bool,
+) -> (Result<(), Box<dyn std::error::Error>>, bool, u64) {
+    let mut writer = match interface.endpoint::<Bulk, Out>(EP_BULK_OUT) {
+        Ok(ep) => ep.writer(4096).with_num_transfers(8),
+        Err(e) => return (Err(e.into()), false, 0),
+    };
+
+    let mut last_status_time = Instant::now();
+    let status_interval = Duration::from_millis(100);
+    let mut total_bytes_sent: u64 = 0;
+    let mut read_buf = [0u8; 4096];
+
+    loop {
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => return (Err(e.into()), false, total_bytes_sent),
+        };
+        let mut reader = BufReader::new(file);
+        let mut bit_state = BitState::default();
+
+        loop {
+            if !running.load(Ordering::SeqCst) {
+                return (Ok(()), false, total_bytes_sent);
+            }
+
+            match reader.read(&mut read_buf) {
+                Ok(0) => {
+                    // EOF - flush remaining bits
+                    if let Some(byte) = flush_bits(&mut bit_state) {
+                        if let Err(e) = writer.write_all(&[byte]) {
+                            return (Err(e.into()), !loop_input, total_bytes_sent);
+                        }
+                        total_bytes_sent += 1;
+                    }
+                    break;
+                }
+                Ok(n) => {
+                    match process_input(&read_buf[..n], format, &mut bit_state) {
+                        Ok(packed) => {
+                            if !packed.is_empty() {
+                                if let Err(e) = writer.write_all(&packed) {
+                                    return (Err(e.into()), !loop_input, total_bytes_sent);
+                                }
+                                total_bytes_sent += packed.len() as u64;
+                            }
+                        }
+                        Err(e) => return (Err(e.into()), false, total_bytes_sent),
+                    }
+                }
+                Err(e) => return (Err(e.into()), false, total_bytes_sent),
+            }
+
+            if show_status && last_status_time.elapsed() >= status_interval {
+                if let Ok(status) = get_status(interface) {
+                    display_status(&status, total_bytes_sent);
+                }
+                last_status_time = Instant::now();
+            }
+        }
+
+        if !loop_input {
+            break;
+        }
+    }
+
+    if running.load(Ordering::SeqCst) {
+        if let Err(e) = writer.flush() {
+            return (Err(e.into()), !loop_input, total_bytes_sent);
+        }
+        if !loop_input {
+            eprintln!("\nFile sent, draining buffer...");
+        }
+    }
+
+    (Ok(()), !loop_input, total_bytes_sent)
 }
 
 fn display_status(status: &BufferStatus, total_sent: u64) {
