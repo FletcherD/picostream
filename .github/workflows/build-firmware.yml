@@ -3,22 +3,9 @@ name: Build
 on:
   push:
     branches: [main]
-    paths:
-      - 'firmware/**'
-      - 'client/**'
-      - 'shared/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/build-firmware.yml'
+    tags: ['v*']
   pull_request:
     branches: [main]
-    paths:
-      - 'firmware/**'
-      - 'client/**'
-      - 'shared/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/build-firmware.yml'
   workflow_dispatch:
 
 jobs:
