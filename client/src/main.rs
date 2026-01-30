@@ -4,11 +4,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use nusb::transfer::{Bulk, ControlIn, ControlOut, ControlType, Out, Recipient};
 use nusb::MaybeFuture;
 
 use pico_bitstream_shared::*;
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum InputFormat {
+    /// Packed bytes (default)
+    #[default]
+    Bytes,
+    /// ASCII '0' and '1' characters (whitespace ignored)
+    Bits,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "pico-bitstream")]
@@ -17,6 +26,10 @@ struct Args {
     /// Sample rate in Hz
     #[arg(short = 's', long = "sample-rate")]
     sample_rate: u32,
+
+    /// Input format
+    #[arg(short = 'f', long = "format", default_value = "bytes")]
+    format: InputFormat,
 
     /// Skip status display
     #[arg(long)]
@@ -50,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Stream data from stdin
     let (result, eof_reached, total_bytes_sent) =
-        stream_data(&interface, running.clone(), !args.quiet);
+        stream_data(&interface, running.clone(), !args.quiet, args.format);
 
     // Stop streaming - use drain_and_stop for clean EOF, immediate stop for interrupt
     if eof_reached && running.load(Ordering::SeqCst) {
@@ -191,6 +204,7 @@ fn stream_data(
     interface: &nusb::Interface,
     running: Arc<AtomicBool>,
     show_status: bool,
+    format: InputFormat,
 ) -> (Result<(), Box<dyn std::error::Error>>, bool, u64) {
     let stdin = io::stdin();
     let stdin_fd = stdin.as_raw_fd();
@@ -218,19 +232,70 @@ fn stream_data(
     let mut eof_reached = false;
     let mut total_bytes_sent: u64 = 0;
 
+    // State for bits mode
+    let mut bit_accumulator: u8 = 0;
+    let mut bits_collected: u8 = 0;
+
     while running.load(Ordering::SeqCst) && !eof_reached {
         // Read from stdin (non-blocking)
         match stdin.read(&mut read_buf) {
             Ok(0) => {
                 eof_reached = true;
+                // In bits mode, flush any remaining bits (padded with zeros)
+                if matches!(format, InputFormat::Bits) && bits_collected > 0 {
+                    bit_accumulator <<= 8 - bits_collected;
+                    if let Err(e) = writer.write_all(&[bit_accumulator]) {
+                        return (Err(e.into()), eof_reached, total_bytes_sent);
+                    }
+                    total_bytes_sent += 1;
+                }
                 eprintln!("\nEOF reached, draining buffer...");
             }
             Ok(n) => {
-                // Write to USB
-                if let Err(e) = writer.write_all(&read_buf[..n]) {
-                    return (Err(e.into()), eof_reached, total_bytes_sent);
+                match format {
+                    InputFormat::Bytes => {
+                        if let Err(e) = writer.write_all(&read_buf[..n]) {
+                            return (Err(e.into()), eof_reached, total_bytes_sent);
+                        }
+                        total_bytes_sent += n as u64;
+                    }
+                    InputFormat::Bits => {
+                        let mut packed_bytes = Vec::new();
+                        for &byte in &read_buf[..n] {
+                            let ch = byte as char;
+                            match ch {
+                                '0' => {
+                                    bit_accumulator = (bit_accumulator << 1) | 0;
+                                    bits_collected += 1;
+                                }
+                                '1' => {
+                                    bit_accumulator = (bit_accumulator << 1) | 1;
+                                    bits_collected += 1;
+                                }
+                                // Ignore whitespace and newlines
+                                ' ' | '\t' | '\n' | '\r' => {}
+                                _ => {
+                                    return (
+                                        Err(format!("Invalid character in bits mode: {:?}", ch).into()),
+                                        eof_reached,
+                                        total_bytes_sent,
+                                    );
+                                }
+                            }
+                            if bits_collected == 8 {
+                                packed_bytes.push(bit_accumulator);
+                                bit_accumulator = 0;
+                                bits_collected = 0;
+                            }
+                        }
+                        if !packed_bytes.is_empty() {
+                            if let Err(e) = writer.write_all(&packed_bytes) {
+                                return (Err(e.into()), eof_reached, total_bytes_sent);
+                            }
+                            total_bytes_sent += packed_bytes.len() as u64;
+                        }
+                    }
                 }
-                total_bytes_sent += n as u64;
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 // No data available, sleep briefly and check running flag

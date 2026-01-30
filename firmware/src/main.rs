@@ -4,6 +4,8 @@
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use critical_section::with as cs_with;
+
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::join::join3;
@@ -413,7 +415,15 @@ async fn pio_feeder(
 
     loop {
         // Check for config changes (sample rate)
-        if CONFIG_CHANGED.swap(false, Ordering::AcqRel) {
+        // Use critical section for atomic swap since thumbv6m lacks native swap
+        let config_changed = cs_with(|_| {
+            let val = CONFIG_CHANGED.load(Ordering::Relaxed);
+            if val {
+                CONFIG_CHANGED.store(false, Ordering::Relaxed);
+            }
+            val
+        });
+        if config_changed {
             let new_rate = STATE.lock(|s| s.borrow().sample_rate);
             if new_rate != current_sample_rate {
                 current_sample_rate = new_rate;

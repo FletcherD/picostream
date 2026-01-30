@@ -51,6 +51,7 @@ Desktop CLI using nusb 0.2:
 - Status display on stderr (~10 Hz updates)
 - Clean EOF handling: uses DRAIN_AND_STOP to wait for firmware buffer to empty
 - Ctrl-C handling: uses immediate STOP
+- Input formats: `bytes` (packed bytes, default) or `bits` (ASCII '0'/'1' characters, whitespace ignored)
 
 ## Building & Flashing
 
@@ -78,7 +79,7 @@ cargo build --release -p pico-bitstream
 ## Usage
 
 ```bash
-# Continuous streaming from file
+# Continuous streaming from file (bytes format, default)
 cat data.bin | ./target/release/pico-bitstream -s 100000
 
 # Continuous 500kHz square wave (0x55 = 01010101 at 1MHz = 500kHz fundamental)
@@ -86,6 +87,12 @@ cat /dev/zero | tr '\0' $'\x55' | ./target/release/pico-bitstream -s 1000000
 
 # Send a few seconds of 500kHz square wave
 dd if=/dev/zero bs=4096 count=256 2>/dev/null | tr '\0' $'\x55' | ./target/release/pico-bitstream -s 1000000
+
+# Using bits format - ASCII '0' and '1' characters (whitespace ignored)
+echo "01010101" | ./target/release/pico-bitstream -s 1000000 -f bits
+
+# Bits format from file (can include spaces/newlines for readability)
+cat pattern.txt | ./target/release/pico-bitstream -s 1000000 -f bits
 ```
 
 ## USB Protocol
