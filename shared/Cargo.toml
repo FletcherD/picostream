@@ -1,6 +1,10 @@
 [package]
 name = "picostream-shared"
-version = "0.1.0"
-edition = "2021"
+description = "Shared definitions for picostream USB protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]

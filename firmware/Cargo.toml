@@ -1,7 +1,11 @@
 [package]
 name = "picostream-firmware"
-version = "0.1.0"
-edition = "2021"
+description = "RP2040/RP235x firmware for picostream USB bitstream device"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
 rp2040 = ["embassy-rp/rp2040"]
@@ -28,8 +32,3 @@ panic-probe = { version = "1", features = ["print-defmt"] }
 static_cell = "2"
 portable-atomic = { version = "1", features = ["critical-section"] }
 fixed = "1.23"
-
-[profile.release]
-debug = 2
-lto = true
-opt-level = "s"

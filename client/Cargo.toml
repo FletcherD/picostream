@@ -1,7 +1,11 @@
 [package]
 name = "picostream"
-version = "0.1.0"
-edition = "2021"
+description = "Stream digital bitstreams to RP2040/RP235x GPIO over USB"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 picostream-shared = { path = "../shared" }

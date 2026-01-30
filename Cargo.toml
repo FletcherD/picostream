@@ -5,3 +5,15 @@ members = [
     "firmware",
     "client",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2026"
+authors = ["Fletcher Dostie"]
+license = "MIT"
+repository = "https://github.com/FletcherD/picostream"
+
+[profile.release]
+debug = 2
+lto = true
+opt-level = "s"
