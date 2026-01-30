@@ -60,7 +60,7 @@ echo "Client log: $CLIENT_LOG"
 
 # Send test pattern: 0xAA repeated (creates 500Hz square wave at 1kHz sample rate)
 
-dd if=/dev/zero bs=4096 count=256 2>/dev/null | tr '\0' $'\x55' | timeout 5 ./target/release/pico-bitstream -s 1000000 \
+dd if=/dev/zero bs=4096 count=256 2>/dev/null | tr '\0' $'\x55' | ./target/release/pico-bitstream -s 1000000 \
     > "$CLIENT_LOG" 2>&1
 CLIENT_EXIT=$?
 

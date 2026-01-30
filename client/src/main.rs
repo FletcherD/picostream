@@ -58,8 +58,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Print final status
     if let Ok(status) = get_status(&interface) {
         eprintln!(
-            "Final: {} bytes remaining, {} underruns",
-            status.bytes_used, status.underrun_count
+            "Final: {} samples remaining, {} underruns",
+            format_samples(status.bytes_used as u64 * 8),
+            status.underrun_count
         );
     }
 
@@ -241,17 +242,30 @@ fn display_status(status: &BufferStatus, total_sent: u64) {
 
     let bar: String = "#".repeat(filled) + &"-".repeat(empty);
 
-    let used_kb = status.bytes_used as f32 / 1024.0;
-    let total_kb = status.buffer_size as f32 / 1024.0;
+    let used_samples = status.bytes_used as u64 * 8;
+    let total_samples = status.buffer_size as u64 * 8;
+    let sent_samples = total_sent * 8;
 
     eprint!(
-        "\r[{}] {:3}% | {:5.1} KB/{:.0} KB | {} underruns | sent: {:.1} KB   ",
+        "\r[{}] {:3}% | {}/{} samples | {} underruns | sent: {}   ",
         bar,
         pct,
-        used_kb,
-        total_kb,
+        format_samples(used_samples),
+        format_samples(total_samples),
         status.underrun_count,
-        total_sent as f32 / 1024.0
+        format_samples(sent_samples),
     );
     let _ = io::stderr().flush();
+}
+
+fn format_samples(samples: u64) -> String {
+    if samples >= 1_000_000_000 {
+        format!("{:.1}G", samples as f64 / 1_000_000_000.0)
+    } else if samples >= 1_000_000 {
+        format!("{:.1}M", samples as f64 / 1_000_000.0)
+    } else if samples >= 1_000 {
+        format!("{:.1}K", samples as f64 / 1_000.0)
+    } else {
+        format!("{}", samples)
+    }
 }

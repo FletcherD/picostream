@@ -93,7 +93,7 @@ echo -ne '\xAA\xAA' | ./target/release/pico-bitstream -s 1000
 |---------|------|-----------|------|-------------|
 | SET_SAMPLE_RATE | 0x01 | OUT | u32 LE | Set output rate in Hz |
 | START | 0x02 | OUT | none | Start streaming, clear buffer and underrun count |
-| STOP | 0x03 | OUT | none | Stop streaming |
+| STOP | 0x03 | OUT | none | Stop streaming, clear buffer |
 | GET_STATUS | 0x10 | IN | BufferStatus | Get buffer status |
 
 BufferStatus (16 bytes):
@@ -133,7 +133,14 @@ nusb examples at `/home/fletcher/RustroverProjects/nusb/examples/`:
 **Firmware architecture:**
 - `DeviceState` in `Mutex<CriticalSectionRawMutex, RefCell<...>>` for shared state
 - `ControlHandler` implements `embassy_usb::Handler` for vendor requests (sync callbacks)
-- `bulk_handler` async task: USB bulk OUT → ring buffer → DMA → PIO
+- Two independent async tasks for decoupled USB/PIO operation:
+  - `usb_receiver`: USB bulk OUT → ring buffer (waits for space before reading)
+  - `pio_feeder`: ring buffer → DMA → PIO (runs independently)
+- Signal-based coordination:
+  - `DATA_AVAILABLE`: USB receiver signals PIO feeder when new data arrives
+  - `SPACE_AVAILABLE`: PIO feeder signals USB receiver after draining data
+- Backpressure: USB receiver waits for buffer space before calling `ep.read()`, causing USB host to NAK
+- START/STOP control requests clear the ring buffer and signal `SPACE_AVAILABLE` to wake tasks
 
 **PIO configuration:**
 - Program: `set pindirs, 1` (runs once) then `out pins, 1` in wrap loop
@@ -145,6 +152,7 @@ nusb examples at `/home/fletcher/RustroverProjects/nusb/examples/`:
 - `interface.endpoint::<Bulk, Out>(addr)?.writer(buf_size).with_num_transfers(n)`
 - Control: `interface.control_out(ControlOut{...}, timeout).wait()?`
 - `MaybeFuture` trait provides `.wait()` for blocking
+- Non-blocking stdin via `fcntl(O_NONBLOCK)` for responsive Ctrl-C handling
 
 ### Build System
 
@@ -186,16 +194,41 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="1209", ATTR{idProduct}=="0001", MODE="0666", 
 
 ### Dependencies (firmware)
 - embassy-executor 0.9, embassy-rp 0.9, embassy-usb 0.5
+- embassy-sync for Signal coordination between tasks
+- embassy-time for Timer in PIO feeder
 - defmt 1.x, defmt-rtt 1.x for logging
 - fixed for clock divider math
+
+### Dependencies (client)
+- nusb 0.2 for USB communication
+- clap 4 for CLI argument parsing
+- ctrlc for Ctrl-C handling
+- libc for non-blocking stdin (fcntl)
 
 ## Testing
 
 ### test-firmware.sh
+Automated end-to-end test script:
+- Flashes and runs firmware with `DEFMT_LOG=debug`, capturing logs in background
+- Waits for USB device to enumerate (timeout 30s)
+- Sends 1KB test pattern (0xAA) at 1MHz via client
+- Kills probe-rs process when done
+- Saves timestamped logs to `/tmp/pico-bitstream-{firmware,client}-YYYYMMDD_HHMMSS.log`
 
-A test script to: 
-- flash and run the firmware while capturing debug logs in the background. 
-- run the client and send it a block of data.
-- when the send finishes, kill the probe-rs process. 
-- save the logs from the firmware and client (both stdout and stderr) to separate files in /tmp and print their locations. 
-Use this script any time you want to run the entire system end to end to test or capture logs.
+### test-timing.sh
+Captures GPIO output using Sipeed SLogic16 and applies sigrok timing decoder:
+```bash
+./test-timing.sh
+```
+- Starts client sending 0xAA pattern at 1MHz in background
+- Records 2s of D0 at 5MHz sample rate
+- Applies timing decoder to show edge timing
+- Cleans up on exit
+
+### Interpreting Client Status
+```
+[----------]   0% |   0.0 KB/32 KB | 0 underruns | sent: 480.0 KB
+```
+- `0.0 KB/32 KB`: Buffer fill level (low means data flows through quickly)
+- `0 underruns`: PIO stalls waiting for data
+- `sent: 480.0 KB`: Total bytes sent to device
