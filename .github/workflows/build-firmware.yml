@@ -45,6 +45,9 @@ jobs:
         with:
           key: firmware-${{ matrix.board }}
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
       - name: Install elf2uf2-rs
         run: cargo install elf2uf2-rs
 
@@ -93,6 +96,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: client-${{ matrix.arch }}
+
+      - name: Install system dependencies
+        if: ${{ !matrix.cross }}
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
       - name: Install cross
         if: matrix.cross
