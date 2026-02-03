@@ -115,6 +115,8 @@ jobs:
     needs: [build-firmware, build-client]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
 
     steps:
       - name: Download all artifacts
