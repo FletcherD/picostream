@@ -1,7 +1,9 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
-use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
+
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -281,10 +283,11 @@ fn stream_from_stdin(
     format: InputFormat,
 ) -> (Result<(), Box<dyn std::error::Error>>, bool, u64) {
     let stdin = io::stdin();
-    let stdin_fd = stdin.as_raw_fd();
 
-    // Set stdin to non-blocking
+    // Set stdin to non-blocking (Unix only)
+    #[cfg(unix)]
     unsafe {
+        let stdin_fd = stdin.as_raw_fd();
         let flags = libc::fcntl(stdin_fd, libc::F_GETFL);
         libc::fcntl(stdin_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
