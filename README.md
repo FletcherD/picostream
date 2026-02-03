@@ -17,29 +17,45 @@ picostream turns a Raspberry Pi Pico (or Pico 2) into a USB-controlled digital s
 - **Output pin:** GPIO 0 (directly accessible on the Pico's pin header)
 - **Sample rate:** Up to ~8 MHz 
 
+## Installation
+
+### Using prebuilt releases (recommended)
+
+Download the latest release from [GitHub Releases](https://github.com/FletcherD/picostream/releases):
+
+**Firmware (flash to your Pico):**
+- `firmware-rp2040.uf2` - For Raspberry Pi Pico (RP2040)
+- `firmware-rp235x.uf2` - For Raspberry Pi Pico 2 (RP2350)
+
+To flash: hold the BOOTSEL button while connecting the Pico via USB, then drag the `.uf2` file to the mounted drive.
+
+**Client (run on your computer):**
+- `client-linux-x86_64` - Linux (Intel/AMD 64-bit)
+- `client-linux-aarch64` - Linux (ARM 64-bit, e.g. Raspberry Pi 4/5)
+- `client-linux-armv7` - Linux (ARM 32-bit, e.g. Raspberry Pi 3)
+- `client-macos-aarch64` - macOS (Apple Silicon)
+- `client-macos-x86_64` - macOS (Intel)
+- `client-windows-x86_64.exe` - Windows (64-bit)
+
+After downloading, make the client executable (Linux/macOS):
+```bash
+chmod +x client-linux-x86_64
+./client-linux-x86_64 --help
+```
+
+### Building from source
+
+See [Building from source](#building-from-source) below.
+
 ## Quick Start
 
 ### 1. Flash the firmware
 
-You'll need [probe-rs](https://probe.rs/) installed and a debug probe connected.
+Download the appropriate `.uf2` file from [releases](https://github.com/FletcherD/picostream/releases), hold BOOTSEL while plugging in the Pico, and drag the file to the mounted drive.
 
-**For Pico (RP2040):**
-```bash
-cargo run --release -p picostream-firmware \
-  --target thumbv6m-none-eabi --features rp2040
-```
+### 2. Download the client
 
-**For Pico 2 (RP235x):**
-```bash
-cargo run --release -p picostream-firmware \
-  --target thumbv8m.main-none-eabihf --features rp235x
-```
-
-### 2. Build the client
-
-```bash
-cargo build --release -p picostream
-```
+Get the appropriate client binary for your platform from [releases](https://github.com/FletcherD/picostream/releases).
 
 ### 3. Stream some bits
 
@@ -92,18 +108,36 @@ Options:
 ## Building from source
 
 **Prerequisites:**
-- Rust toolchain with appropriate targets:
+- Rust toolchain: https://rustup.rs/
+- For firmware: appropriate target and [probe-rs](https://probe.rs/) for flashing
   ```bash
-  rustup target add thumbv6m-none-eabi      # For RP2040
-  rustup target add thumbv8m.main-none-eabihf  # For RP235x
+  rustup target add thumbv6m-none-eabi        # For RP2040
+  rustup target add thumbv8m.main-none-eabihf # For RP235x
   ```
-- [probe-rs](https://probe.rs/) for flashing firmware
 
-**Build everything:**
+**Build the client:**
 ```bash
-cargo build --release -p picostream                    # Client
+cargo build --release -p picostream
+# Binary will be at target/release/picostream
+```
+
+**Build and flash firmware (requires debug probe):**
+```bash
+# For Pico (RP2040):
+cargo run --release -p picostream-firmware \
+  --target thumbv6m-none-eabi --features rp2040
+
+# For Pico 2 (RP235x):
+cargo run --release -p picostream-firmware \
+  --target thumbv8m.main-none-eabihf --features rp235x
+```
+
+**Build firmware without flashing (to get .uf2 file):**
+```bash
+cargo install elf2uf2-rs
 cargo build --release -p picostream-firmware \
-  --target thumbv6m-none-eabi --features rp2040        # Firmware (RP2040)
+  --target thumbv6m-none-eabi --features rp2040
+elf2uf2-rs target/thumbv6m-none-eabi/release/picostream-firmware firmware.uf2
 ```
 
 ## Linux USB permissions

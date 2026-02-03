@@ -48,15 +48,15 @@ jobs:
         run: |
           elf2uf2-rs \
             target/${{ matrix.target }}/release/picostream-firmware \
-            picostream-${{ matrix.board }}.uf2
+            firmware-${{ matrix.board }}.uf2
 
       - name: Upload UF2 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: picostream-${{ matrix.board }}.uf2
-          path: picostream-${{ matrix.board }}.uf2
+          name: firmware-${{ matrix.board }}.uf2
+          path: firmware-${{ matrix.board }}.uf2
 
-  build-client:
+  build-client-linux:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -82,7 +82,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: client-${{ matrix.arch }}
+          key: client-linux-${{ matrix.arch }}
 
       - name: Install system dependencies
         if: ${{ !matrix.cross }}
@@ -103,16 +103,88 @@ jobs:
       - name: Rename binary
         run: |
           cp target/${{ matrix.target }}/release/picostream \
-            picostream-linux-${{ matrix.arch }}
+            client-linux-${{ matrix.arch }}
 
       - name: Upload client artifact
         uses: actions/upload-artifact@v4
         with:
-          name: picostream-linux-${{ matrix.arch }}
-          path: picostream-linux-${{ matrix.arch }}
+          name: client-linux-${{ matrix.arch }}
+          path: client-linux-${{ matrix.arch }}
+
+  build-client-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            arch: x86_64
+          - target: aarch64-apple-darwin
+            arch: aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: client-macos-${{ matrix.arch }}
+
+      - name: Build client
+        run: cargo build --release -p picostream --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: |
+          cp target/${{ matrix.target }}/release/picostream \
+            client-macos-${{ matrix.arch }}
+
+      - name: Upload client artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-macos-${{ matrix.arch }}
+          path: client-macos-${{ matrix.arch }}
+
+  build-client-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: client-windows-${{ matrix.arch }}
+
+      - name: Build client
+        run: cargo build --release -p picostream --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: |
+          copy target\${{ matrix.target }}\release\picostream.exe `
+            client-windows-${{ matrix.arch }}.exe
+
+      - name: Upload client artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-windows-${{ matrix.arch }}.exe
+          path: client-windows-${{ matrix.arch }}.exe
 
   release:
-    needs: [build-firmware, build-client]
+    needs: [build-firmware, build-client-linux, build-client-macos, build-client-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -131,8 +203,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/picostream-rp2040.uf2/picostream-rp2040.uf2
-            artifacts/picostream-rp235x.uf2/picostream-rp235x.uf2
-            artifacts/picostream-linux-x86_64/picostream-linux-x86_64
-            artifacts/picostream-linux-aarch64/picostream-linux-aarch64
-            artifacts/picostream-linux-armv7/picostream-linux-armv7
+            artifacts/firmware-rp2040.uf2/firmware-rp2040.uf2
+            artifacts/firmware-rp235x.uf2/firmware-rp235x.uf2
+            artifacts/client-linux-x86_64/client-linux-x86_64
+            artifacts/client-linux-aarch64/client-linux-aarch64
+            artifacts/client-linux-armv7/client-linux-armv7
+            artifacts/client-macos-x86_64/client-macos-x86_64
+            artifacts/client-macos-aarch64/client-macos-aarch64
+            artifacts/client-windows-x86_64.exe/client-windows-x86_64.exe
